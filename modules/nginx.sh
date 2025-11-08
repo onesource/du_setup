@@ -112,6 +112,7 @@ configure_nginx_security() {
         esac
         break
     done
+}
 
 # --- Containerized Nginx Installation ---
 install_nginx_container() {
@@ -641,3 +642,4 @@ remove_host_nginx() {
 
     print_success "Host-based Nginx installation removed."
     log "Host-based Nginx installation removed."
+}

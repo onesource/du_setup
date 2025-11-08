@@ -354,6 +354,7 @@ rollback_ssh_changes() {
                 print_error "Manual SSH start failed (exit code $TIMEOUT_EXIT). Check /tmp/sshd_manual_start.log."
                 log "Rollback failed: Manual SSH start failed (exit code $TIMEOUT_EXIT). See /tmp/sshd_manual_start.log."
             fi
+        fi
     fi
 
     # Verify rollback with retries

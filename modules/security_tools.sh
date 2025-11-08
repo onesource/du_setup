@@ -125,7 +125,7 @@ configure_kernel_hardening() {
     KERNEL_HARDENING_CONFIG=$(mktemp)
     # create config in a temporary file
     tee "$KERNEL_HARDENING_CONFIG" > /dev/null <<'EOF'
-# Recommended Security Settings managed by du_setup.sh
+# Recommended Security Settings managed by du_setup_modular.sh
 # For details, see: https://www.kernel.org/doc/Documentation/sysctl/
 
 # --- IPV4 Networking ---

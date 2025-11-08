@@ -10,8 +10,8 @@ if command -v tput >/dev/null 2>&1 && tput setaf 1 >/dev/null 2>&1; then
     RED=$(tput setaf 1)
     GREEN=$(tput setaf 2)
     YELLOW="$(tput bold)$(tput setaf 3)"
-    BLUE=$(tput setaf 4)
-    PURPLE=$(tput setaf 5)
+    BLUE=$(tput setaf 12)  # Bright blue instead of standard blue
+    PURPLE=$(tput setaf 13)  # Bright purple instead of standard purple
     CYAN=$(tput setaf 6)
     BOLD=$(tput bold)
     NC=$(tput sgr0)
@@ -19,8 +19,8 @@ else
     RED=$'\e[0;31m'
     GREEN=$'\e[0;32m'
     YELLOW=$'\e[1;33m'
-    BLUE=$'\e[0;34m'
-    PURPLE=$'\e[0;35m'
+    BLUE=$'\e[0;94m'  # Bright blue (code 94) instead of standard blue (34)
+    PURPLE=$'\e[0;95m'  # Bright purple (code 95) instead of standard purple (35)
     CYAN=$'\e[0;36m'
     NC=$'\e[0m'
     BOLD=$'\e[1m'
@@ -37,7 +37,7 @@ print_header() {
     printf '%s\n' "${CYAN}╔═════════════════════════════════════════════════════════════════╗${NC}"
     printf '%s\n' "${CYAN}║                                                                 ║${NC}"
     printf '%s\n' "${CYAN}║       DEBIAN/UBUNTU SERVER SETUP AND HARDENING SCRIPT           ║${NC}"
-    printf '%s\n' "${CYAN}║                      v0.73 | 2025-10-22                         ║${NC}"
+    printf '%s\n' "${CYAN}║                v0.74.01_modular | 2025-11-08                    ║${NC}"
     printf '%s\n' "${CYAN}║                                                                 ║${NC}"
     printf '%s\n' "${CYAN}╚═════════════════════════════════════════════════════════════════╝${NC}"
     printf '\n'

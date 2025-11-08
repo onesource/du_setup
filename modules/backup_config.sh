@@ -99,6 +99,7 @@ setup_backup() {
                 KEY_COPY_CHOICE=2
             fi
         fi
+    fi
     if [[ "$KEY_COPY_CHOICE" == "2" ]]; then
         print_warning "ACTION REQUIRED: Copy root SSH key to backup destination."
         printf 'This will allow root user to connect without a password for automated backups.\n'
@@ -330,7 +331,6 @@ EOF
     print_success "Backup cron job scheduled: $CRON_SCHEDULE"
     log "Backup configuration completed."
 }
-
 # --- Backup Test Function ---
 test_backup() {
     print_section "Backup Configuration Test"
@@ -431,12 +431,13 @@ test_backup() {
                     ;;
             esac
         fi
+    fi
 
-        print_info "Common troubleshooting steps:"
+    print_info "Common troubleshooting steps:"
         print_info "  - Ensure root SSH key is copied: ssh-copy-id -p \"$BACKUP_PORT\" -i \"$SSH_KEY.pub\" $SSH_COPY_ID_FLAGS \"$BACKUP_DEST\""
         print_info "  - Manually test SSH connection: ssh -p \"$BACKUP_PORT\" -i \"$SSH_KEY\" \"$BACKUP_DEST\""
         print_info "  - Check permissions on the remote path: '${REMOTE_BACKUP_PATH}'"
-    fi
+
 
     # Clean up local temporary test directory and file
     rm -rf "$TEST_DIR" 2>/dev/null

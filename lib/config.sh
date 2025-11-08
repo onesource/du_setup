@@ -6,12 +6,12 @@
 # ============================================================================
 
 # --- Update Configuration ---
-CURRENT_VERSION="0.74-modular"
+CURRENT_VERSION="0.74.01-modular"
 SCRIPT_URL="https://raw.githubusercontent.com/onesource/du_setup/refs/heads/main/du_setup_modular.sh"
+CONFIG_URL="https://raw.githubusercontent.com/onesource/du_setup/refs/heads/main/lib/config.sh"
 CHECKSUM_URL="${SCRIPT_URL}.sha256"
 
 # --- Script Variables ---
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="/var/log/du_setup_$(date +%Y%m%d_%H%M%S).log"
 BACKUP_LOG="/var/log/backup_rsync.log"
 REPORT_FILE="/var/log/du_setup_report_$(date +%Y%m%d_%H%M%S).txt"

@@ -149,13 +149,13 @@ EOF
         print_info "No NVMe SSD detected. Skipping NVMe optimizations."
     fi
     log "System configuration completed."
-
+}
     # --- PRELIMINARY CHECKS ---
     check_system() {
         print_section "System Compatibility Check"
 
         if [[ $(id -u) -ne 0 ]]; then
-            print_error "This script must be run as root (e.g., sudo ./du_setup.sh)."
+            print_error "This script must be run as root (e.g., sudo ./du_setup_modular.sh)."
             exit 1
         fi
         print_success "Running with root privileges."
@@ -229,9 +229,9 @@ EOF
         local latest_version
 
         # Fetch the latest script from GitHub and parse version number from it.
-        if ! latest_version=$(curl -sL "$SCRIPT_URL" | grep '^CURRENT_VERSION=' | head -n 1 | awk -F'"' '{print $2}'); then
+        if ! latest_version=$(curl -sL "$CONFIG_URL" | grep '^CURRENT_VERSION=' | head -n 1 | awk -F'"' '{print $2}'); then
             print_warning "Could not check for updates. Please check your internet connection."
-            log "Update check failed: Could not fetch script from $SCRIPT_URL"
+            log "Update check failed: Could not fetch script from $CONFIG_URL"
             return
         fi
 
@@ -258,7 +258,7 @@ EOF
             fi
             trap 'rm -rf -- "$temp_dir"' EXIT
 
-            local temp_script="$temp_dir/du_setup.sh"
+            local temp_script="$temp_dir/du_setup_modular.sh"
             local temp_checksum="$temp_dir/checksum.sha256"
 
             print_info "Downloading new script version..."
