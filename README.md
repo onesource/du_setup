@@ -125,11 +125,6 @@ sha256sum -c du_setup_modular.sh.sha256
 
 Ideally run as root, if you are a sudo user you can switch to root with `sudo su`
 
-For the original script:
-```bash
-./du_setup.sh
-```
-
 For the modular script:
 ```bash
 ./du_setup_modular.sh
@@ -137,22 +132,12 @@ For the modular script:
 
 Alternatively run with sudo -E, -E flag preserve the environment variables.
 
-For the original script:
-```bash
-sudo -E ./du_setup.sh
-```
-
 For the modular script:
 ```bash
 sudo -E ./du_setup_modular.sh
 ```
 
 #### Quiet Mode (For Automation)
-
-For the original script:
-```bash
-sudo -E ./du_setup.sh --quiet
-```
 
 For the modular script:
 ```bash
@@ -198,11 +183,11 @@ Cleanup is optional but recommended for commercial VPS environments to reduce at
 
 ### Usage
 
-* **Preview cleanup actions:** `sudo ./du_setup.sh --cleanup-preview` or `sudo ./du_setup_modular.sh --cleanup-preview`
+* **Preview cleanup actions:** `sudo ./du_setup_modular.sh --cleanup-preview`
   Shows what would be removed without making changes.
-* **Run cleanup only:** `sudo ./du_setup.sh --cleanup-only` or `sudo ./du_setup_modular.sh --cleanup-only`
+* **Run cleanup only:** `sudo ./du_setup_modular.sh --cleanup-only`
   Executes provider cleanup on existing servers without full setup.
-* **Skip cleanup:** `sudo ./du_setup.sh --skip-cleanup` or `sudo ./du_setup_modular.sh --skip-cleanup`
+* **Skip cleanup:** `sudo ./du_setup_modular.sh --skip-cleanup`
   Runs full setup but skips the cleanup phase.
 
 ### What it detects
@@ -365,3 +350,4 @@ If Tailscale fails to connect:
 ## MIT [License](https://github.com/onesource/du_setup/blob/main/LICENSE)
 
 This script is open-source and provided "as is" without warranty. Use at your own risk.
+
