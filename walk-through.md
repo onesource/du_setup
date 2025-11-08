@@ -13,7 +13,7 @@
 
 #### **1. Preparation**
 - **Download and Permissions**:
-  - The README instructs downloading with `wget https://raw.githubusercontent.com/buildplan/du_setup/refs/heads/main/du_setup.sh` and setting `chmod +x du_setup.sh`.
+  - The README instructs downloading with `wget https://raw.githubusercontent.com/onesource/du_setup/refs/heads/main/du_setup.sh` and setting `chmod +x du_setup.sh`.
   - Assumed command: `sudo ./du_setup.sh`.
   - The script starts with `#!/bin/bash` and `set -euo pipefail`, ensuring strict error handling.
 

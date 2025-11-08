@@ -1,15 +1,15 @@
 # Debian & Ubuntu Server Setup & Hardening Script
 
 [![Debian Compatibility](https://img.shields.io/badge/Compatibility–Debian%2012%7C13-%23A81D33?style=flat&labelColor=555&logo=debian&logoColor=white)](https://www.debian.org/releases/)
-[![Ubuntu Compatibility](https://img.shields.io/badge/Compatibility–Ubuntu%2022.04%7C24.04-%23E95420?style=flat&labelColor=555&logo=ubuntu&logoColor=white)](https://ubuntu.com/download/server)  
-[![Shell Script Linter](https://github.com/buildplan/du_setup/actions/workflows/lint.yml/badge.svg)](https://github.com/buildplan/du_setup/actions/workflows/lint.yml)
-[![Codacy Security Scan](https://github.com/buildplan/du_setup/actions/workflows/codacy.yml/badge.svg?branch=main)](https://github.com/buildplan/du_setup/actions/workflows/codacy.yml)
+[![Ubuntu Compatibility](https://img.shields.io/badge/Compatibility–Ubuntu%2022.04%7C24.04-%23E95420?style=flat&labelColor=555&logo=ubuntu&logoColor=white)](https://ubuntu.com/download/server)
+[![Shell Script Linter](https://github.com/onesource/du_setup/actions/workflows/lint.yml/badge.svg)](https://github.com/onesource/du_setup/actions/workflows/lint.yml)
+[![Codacy Security Scan](https://github.com/onesource/du_setup/actions/workflows/codacy.yml/badge.svg?branch=main)](https://github.com/onesource/du_setup/actions/workflows/codacy.yml)
 
 -----
 
-**Version:** v0.73
+**Version:** v0.74-modular
 
-**Last Updated:** 2025-10-22
+**Last Updated:** 2025-11-08
 
 **Compatible With:**
 
@@ -19,6 +19,19 @@
 ## Overview
 
 This script automates the initial setup and security hardening of a fresh Debian or Ubuntu server. It is **idempotent**, **safe**, and suitable for **production environments**, providing a secure baseline for further customization. The script runs interactively, guiding users through critical choices while automating essential security and setup tasks.
+
+### v0.74-modular - Modular Architecture
+
+Version 0.74-modular introduces a significant architectural improvement with a modular design that separates functionality into distinct components:
+
+* **Core Script**: The main script (`du_setup_modular.sh`) handles orchestration and user interaction
+* **Library Components**: Shared utilities and configuration management in the `lib/` directory
+* **Functional Modules**: Individual feature modules in the `modules/` directory for easy maintenance and extensibility
+* **Improved Maintainability**: Each module can be updated independently without affecting the entire codebase
+* **Enhanced Testing**: Modular structure allows for better unit testing of individual components
+* **Easier Customization**: Users can now selectively enable/disable or modify specific modules
+
+The modular version maintains full compatibility with the original script's functionality while providing a more maintainable and extensible codebase.
 
 -----
 
@@ -35,10 +48,35 @@ This script automates the initial setup and security hardening of a fresh Debian
 * **Backup Testing**: Includes an optional test backup to verify the rsync configuration before scheduling.
 * **Tailscale VPN**: Installs Tailscale and connects to the standard Tailscale network (pre-auth key required) or a custom server (URL and key required). Configures optional flags (`--ssh`, `--advertise-exit-node`, `--accept-dns`, `--accept-routes`).
 * **Security Auditing**: Optionally runs **Lynis** for system hardening audits and **debsecan** for package vulnerability checks, with results logged for review.
+* **Nginx Web Server**: Installs and configures Nginx with two deployment options:
+  * **Containerized Nginx** (recommended): Docker-based deployment with security-hardened configuration, SSL/TLS support, and resource limits
+  * **Host-based Nginx**: Direct installation on the system for traditional deployments
+  * Includes security headers, rate limiting, access controls, and performance optimizations
+* **Nginx Certificate Management**: Automated SSL/TLS certificate handling:
+  * Self-signed certificate generation for testing
+  * Let's Encrypt integration with automatic renewal
+  * Certificate import functionality for existing certificates
+  * Certificate expiration monitoring and alerts
+* **Nginx Security Monitoring**: Comprehensive monitoring and alerting:
+  * Log analysis with attack pattern detection
+  * Fail2Ban integration for Nginx-specific rules
+  * Real-time security dashboard with metrics visualization
+  * Performance monitoring with resource usage tracking
+* **Nginx Vulnerability Scanner**: Automated security assessment:
+  * Configuration security analysis
+  * CVE monitoring and alerting
+  * Container security scanning
+  * Automated scanning with scheduled reports
+* **Advanced Security Tools**: Enhanced security with additional tools:
+  * **AIDE** (Advanced Intrusion Detection Environment) for file integrity monitoring
+  * **AppArmor** security profiles for application confinement
+  * Extended kernel hardening with AMD EPYC optimizations
 * **Safety First**: Backs up critical configuration files before modification, stored in `/root/setup_harden_backup_*`.
 * **Optional Software**: Offers interactive installation of:
   * Docker & Docker Compose
   * Tailscale (Mesh VPN)
+  * Nginx Web Server (containerized or host-based)
+  * Advanced security tools (AIDE, AppArmor)
 * **Comprehensive Logging**: Logs all actions to `/var/log/du_setup_*.log`.
 * **Automation-Friendly**: Supports `--quiet` mode for automated provisioning.
 
@@ -57,43 +95,29 @@ This script automates the initial setup and security hardening of a fresh Debian
 
 ### 1. Download & Prepare Script
 
+#### Modular Script (v0.74-modular)
 ```bash
-wget https://raw.githubusercontent.com/buildplan/du_setup/refs/heads/main/du_setup.sh
-chmod +x du_setup.sh
+wget https://raw.githubusercontent.com/onesource/du_setup/refs/heads/main/du_setup_modular.sh
+chmod +x du_setup_modular.sh
 ```
+
+> **Note**: This is the new modular architecture version with improved code organization and maintainability.
 
 ### 2. Verify Script Integrity (Recommended)
 
 To ensure the script has not been altered, you can verify its SHA256 checksum.
 
-#### Option A: Automatic Check
-
-This command downloads the official checksum file and automatically compares it against your downloaded script.
+#### For Modular Script (v0.74-modular)
 
 ```bash
 # Download the official checksum file
-wget https://raw.githubusercontent.com/buildplan/du_setup/refs/heads/main/du_setup.sh.sha256
+wget https://raw.githubusercontent.com/onesource/du_setup/refs/heads/main/du_setup_modular.sh.sha256
 
-# Run the check (it should output: du_setup.sh: OK)
-sha256sum -c du_setup.sh.sha256
+# Run the check (it should output: du_setup_modular.sh: OK)
+sha256sum -c du_setup_modular.sh.sha256
 ```
 
-#### Option B: Manual Check
-
-```bash
-# Generate the hash of your downloaded script
-sha256sum du_setup.sh
-```
-
-Compare the output hash to the one below. They must match exactly.
-
-`63695b2b18219e9fed579ae2545ed413c04fbf024cd181d72139409ba1811c1e`
-
-Or echo the hash to check, it should output: `du_setup.sh: OK`
-
-```bash
-echo 63695b2b18219e9fed579ae2545ed413c04fbf024cd181d72139409ba1811c1e du_setup.sh | sha256sum --check
-```
+> **Note**: The SHA256 checksum for the modular version will be available after the initial release.
 
 ### 3. Run the Script
 
@@ -101,20 +125,38 @@ echo 63695b2b18219e9fed579ae2545ed413c04fbf024cd181d72139409ba1811c1e du_setup.s
 
 Ideally run as root, if you are a sudo user you can switch to root with `sudo su`
 
+For the original script:
 ```bash
-./du_setup
+./du_setup.sh
+```
+
+For the modular script:
+```bash
+./du_setup_modular.sh
 ```
 
 Alternatively run with sudo -E, -E flag preserve the environment variables.
 
+For the original script:
 ```bash
 sudo -E ./du_setup.sh
 ```
 
+For the modular script:
+```bash
+sudo -E ./du_setup_modular.sh
+```
+
 #### Quiet Mode (For Automation)
 
+For the original script:
 ```bash
 sudo -E ./du_setup.sh --quiet
+```
+
+For the modular script:
+```bash
+sudo -E ./du_setup_modular.sh --quiet
 ```
 
 > **Warning**: The script pauses to verify SSH access on the new port before disabling old access methods. **Test the new SSH connection from a separate terminal before proceeding!**
@@ -152,15 +194,15 @@ sudo -E ./du_setup.sh --quiet
 
 Detects and optionally removes provider-installed packages, monitoring agents, and default provisioning users to enhance server security.
 
-Cleanup is optional but recommended for commercial VPS environments to reduce attack surface. Review preview outputs carefully before applying cleanup.  
+Cleanup is optional but recommended for commercial VPS environments to reduce attack surface. Review preview outputs carefully before applying cleanup.
 
 ### Usage
 
-* **Preview cleanup actions:** `sudo ./du_setup.sh --cleanup-preview`  
+* **Preview cleanup actions:** `sudo ./du_setup.sh --cleanup-preview` or `sudo ./du_setup_modular.sh --cleanup-preview`
   Shows what would be removed without making changes.
-* **Run cleanup only:** `sudo ./du_setup.sh --cleanup-only`  
+* **Run cleanup only:** `sudo ./du_setup.sh --cleanup-only` or `sudo ./du_setup_modular.sh --cleanup-only`
   Executes provider cleanup on existing servers without full setup.
-* **Skip cleanup:** `sudo ./du_setup.sh --skip-cleanup`  
+* **Skip cleanup:** `sudo ./du_setup.sh --skip-cleanup` or `sudo ./du_setup_modular.sh --skip-cleanup`
   Runs full setup but skips the cleanup phase.
 
 ### What it detects
@@ -320,6 +362,6 @@ If Tailscale fails to connect:
 
 -----
 
-## MIT [License](https://github.com/buildplan/du_setup/blob/main/LICENSE)
+## MIT [License](https://github.com/onesource/du_setup/blob/main/LICENSE)
 
 This script is open-source and provided "as is" without warranty. Use at your own risk.
