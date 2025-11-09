@@ -6,22 +6,23 @@
 # ============================================================================
 
 # Source dependencies
-source "$(dirname "${BASH_SOURCE[0]}")/../lib/config.sh"
-source "$(dirname "${BASH_SOURCE[0]}")/../lib/utils.sh"
+SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]}")"
+source "$SCRIPT_DIR/../lib/config.sh"
+source "$SCRIPT_DIR/../lib/utils.sh"
 
 # --- Vulnerability Management Function ---
 manage_vulnerabilities() {
     print_section "Nginx Vulnerability Management"
 
-    printf '%s\n' "${CYAN}Vulnerability Management Options:${NC}"
-    printf '  1) Run Security Scan${NC}\n'
-    printf '  2) Check for CVEs${NC}\n'
-    printf '  3) Scan Configuration${NC}\n'
-    printf '  4) Container Security Scan${NC}\n'
-    printf '  5) Setup Automated Scanning${NC}\n'
+    printf '%s\n' "Vulnerability Management Options:"
+    printf '  1) Run Security Scan\n'
+    printf '  2) Check for CVEs\n'
+    printf '  3) Scan Configuration\n'
+    printf '  4) Container Security Scan\n'
+    printf '  5) Setup Automated Scanning\n'
 
     while true; do
-        read -rp "$(printf '%s' "${CYAN}Enter choice (1-5): ${NC}")" VULN_CHOICE
+        read -rp "Enter choice (1-5): " VULN_CHOICE
         case $VULN_CHOICE in
             1) run_security_scan ;;
             2) check_cves ;;
@@ -573,7 +574,7 @@ container_security_scan() {
         echo "3. Set resource limits"
         echo "4. Use bridge networking"
         echo "5. Minimize exposed ports"
-        echo "6. Use security profiles (AppArmor/SELinux)"
+        echo "6. Use security profiles (SELinux)"
         echo "7. Regular image updates"
         echo "8. Scan images for vulnerabilities"
 

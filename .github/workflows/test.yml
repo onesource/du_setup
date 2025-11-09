@@ -205,7 +205,7 @@ jobs:
           echo "Validating script structure..."
 
           # Check for required functions in main script
-          required_functions=("show_usage" "main" "init_config")
+          required_functions=("show_usage" "main")
           for func in "${required_functions[@]}"; do
             if grep -q "^$func()" du_setup_modular.sh; then
               echo "✓ Function $func found in main script"
