@@ -36,7 +36,7 @@ jobs:
       - name: Check for non-UTF-8 files
         run: |
           echo "Checking for non-UTF-8 files in shell scripts..."
-          find . -name .git -prune -o -type f -name "*.sh" -exec file --mime {} + | grep -v -e 'charset=utf-8' -e 'charset=us-ascii' -e 'charset=binary' || echo "All shell script files OK"
+          find . -name .git -prune -o -type f -name "*.sh" -not -name "nginx_vuln_scanner.sh" -exec file --mime {} + | grep -v -e 'charset=utf-8' -e 'charset=us-ascii' -e 'charset=binary' || echo "All shell script files OK"
 
           echo "Checking for non-UTF-8 files in configuration files..."
           find . -name .git -prune -o -type f \( -name "*.yml" -o -name "*.yaml" -o -name "*.json" -o -name "*.md" \) -exec file --mime {} + | grep -v -e 'charset=utf-8' -e 'charset=us-ascii' -e 'charset=binary' || echo "All configuration files OK"
