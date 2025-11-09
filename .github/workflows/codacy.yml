@@ -36,7 +36,7 @@ jobs:
       - name: Check for non-UTF-8 files
         run: |
           echo "Checking for non-UTF-8 files in shell scripts..."
-          find . -name .git -prune -o -type f -name "*.sh" -not -name "nginx_vuln_scanner.sh" -exec file --mime {} + | grep -v -e 'charset=utf-8' -e 'charset=us-ascii' -e 'charset=binary' || echo "All shell script files OK"
+          find . -name .git -prune -o -type f -name "*.sh" -exec file --mime {} + | grep -v -e 'charset=utf-8' -e 'charset=us-ascii' -e 'charset=binary' || echo "All shell script files OK"
 
           echo "Checking for non-UTF-8 files in configuration files..."
           find . -name .git -prune -o -type f \( -name "*.yml" -o -name "*.yaml" -o -name "*.json" -o -name "*.md" \) -exec file --mime {} + | grep -v -e 'charset=utf-8' -e 'charset=us-ascii' -e 'charset=binary' || echo "All configuration files OK"
@@ -82,7 +82,7 @@ jobs:
 
       # Execute Codacy Analysis CLI and generate a SARIF output with the security issues identified during the analysis
       - name: Run Codacy Analysis CLI
-        uses: codacy/codacy-analysis-cli-action@d840f886c4bd4edc059706d09c6a1586111c540b
+        uses: codacy/codacy-analysis-cli-action@master
         with:
           # Check https://github.com/codacy/codacy-analysis-cli#project-token to get your project token from your Codacy repository
           # You can also omit the token and run the tools that support default configurations
