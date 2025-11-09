@@ -5,8 +5,10 @@
 # Global variables and configuration settings
 # ============================================================================
 
+# shellcheck disable=SC2034  # Variables are used in other modules that source this file
+
 # --- Update Configuration ---
-CURRENT_VERSION="0.74.01-modular"
+CURRENT_VERSION="0.74.2_modular"
 SCRIPT_URL="https://raw.githubusercontent.com/onesource/du_setup/refs/heads/main/du_setup_modular.sh"
 CONFIG_URL="https://raw.githubusercontent.com/onesource/du_setup/refs/heads/main/lib/config.sh"
 CHECKSUM_URL="${SCRIPT_URL}.sha256"

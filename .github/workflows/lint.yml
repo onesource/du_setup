@@ -21,8 +21,8 @@ jobs:
         run: |
           set -o pipefail
 
-          # Check main script and all modules (exclude bashrc template as it's complex)
-          files_to_check=$(find . -type f -name "*.sh" -not -path "./.git/*" -not -name "bashrc_template.sh" | sort)
+          # Check main script and all modules
+          files_to_check=$(find . -type f -name "*.sh" -not -path "./.git/*" | sort)
 
           if [ -z "$files_to_check" ]; then
             echo "No .sh files found to check."
@@ -48,8 +48,8 @@ jobs:
           # Verify that main script sources all modules in correct order
           if [ -f "du_setup_modular.sh" ]; then
             echo "Checking module dependencies in du_setup_modular.sh..."
-            # Extract sourced files from main script
-            sourced_files=$(grep "^source " du_setup_modular.sh | grep -E "(lib/|modules/)" | awk '{print $2}' | tr -d '"' | tr -d "'" | sort)
+            # Extract sourced files from main script and resolve $SCRIPT_DIR
+            sourced_files=$(grep "^source " du_setup_modular.sh | grep -E "(lib/|modules/)" | sed 's/\$SCRIPT_DIR/./g' | awk '{print $2}' | tr -d '"' | tr -d "'" | sort)
 
             # Check if all referenced files exist
             missing_files=""

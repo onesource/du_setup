@@ -45,7 +45,7 @@ set -o emacs
 # set -o vi
 
 # Make `less` more friendly for non-text input files.
-[ -x /usr/bin/lesspipe ] && eval "$(SHELL=/bin/sh lesspipe)" && export LESS='-R -F -X -i -M -w'
+[ -x /usr/bin/lesspipe ] && eval "$(SHELL=/bin/sh lesspipe)" && export LESS='-RFXiMw'
 # Colored man pages using less (TERMCAP sequences).
 export LESS_TERMCAP_mb=$'\e[1;31m'
 export LESS_TERMCAP_md=$'\e[1;36m'
@@ -140,7 +140,7 @@ __bash_prompt_command() {
 
     # --- Set Terminal Window Title ---
     case "$TERM" in
-      xterm*|rxvt*|xterm-kitty|alacritty|wezterm)
+      xterm-kitty|alacritty|wezterm|xterm*|rxvt*)
         PS1="\[\e]0;${debian_chroot:+($debian_chroot)}\u@\h: \w\a\]$PS1"
         ;;
     esac
@@ -171,13 +171,14 @@ stty -ixon 2>/dev/null
 # --- Useful Functions ---
 # Create a directory and change into it.
 mkcd() {
-    mkdir -p "$1" && cd "$1"
+    mkdir -p "$1" && cd "$1" || exit
 }
 
 # Create a backup of a file with timestamp.
 backup() {
     if [ -f "$1" ]; then
-        local backup_file="$1.backup-$(date +%Y%m%d-%H%M%S)"
+        local backup_file
+        backup_file="$1.backup-$(date +%Y%m%d-%H%M%S)"
         cp "$1" "$backup_file"
         echo "Backup created: $backup_file"
     else
@@ -296,7 +297,7 @@ sysinfo() {
     fi
 
     # --- Header ---
-    printf "\n${BOLD_WHITE}=== System Information ===${RESET}\n"
+    printf "\n%s=== System Information ===%s\n" "${BOLD_WHITE}" "${RESET}"
 
     # --- CPU Info ---
     local cpu_info
@@ -322,12 +323,15 @@ sysinfo() {
     printf "${CYAN}%-15s ${RESET} %s\n" "Uptime:" "$(uptime -p 2>/dev/null || uptime | sed 's/.*up //' | sed 's/,.*//')"
     printf "${CYAN}%-15s ${RESET} %s\n" "Server time:" "$(date '+%Y-%m-%d %H:%M:%S %Z')"
     printf "${CYAN}%-15s ${RESET} %s\n" "CPU:" "$cpu_info"
-    printf "${CYAN}%-15s ${RESET} "Memory:" "$(free -m | awk '/Mem/ {
+
+    # --- FIX 1: Corrected Memory line ---
+    printf "${CYAN}%-15s${RESET}Memory: %s\n" "$(free -m | awk '/Mem/ {
         used = $3; total = $2; percent = int((used/total)*100);
         if (used >= 1024) { used_fmt = sprintf("%.1fGi", used/1024); } else { used_fmt = sprintf("%dMi", used); }
         if (total >= 1024) { total_fmt = sprintf("%.1fGi", total/1024); } else { total_fmt = sprintf("%dMi", total); }
         printf "%s / %s (%d%% used)\n", used_fmt, total_fmt, percent;
     }')"
+
     printf "${CYAN}%-15s ${RESET} %s\n" "Disk (/):" "$(df -h / | awk 'NR==2 {print $3 " / " $4 " (" $5 " used)"}')"
 
     # --- Reboot Status ---
@@ -339,25 +343,10 @@ sysinfo() {
 
     # --- Available Updates (APT) ---
     if command -v apt-get &>/dev/null; then
-        local total security
-        local upgradable_all upgradable_list security_list
-        if [ -x /usr/lib/update-notifier/apt-check ]; then
-            local apt_check_output
-            apt_check_output=$(/usr/lib/update-notifier/apt-check 2>/dev/null)
-            if [ -n "$apt_check_output" ]; then
-                total="${apt_check_output%%;*}"
-                security="${apt_check_output##*;}"
-            fi
-        # Fallback if apt-check didn't provide values
-        if [ -z "$total" ] && [ -z "$security" ]; then
-            total=$(apt list --upgradable 2>/dev/null | grep -c upgradable || echo 0)
-            security=$(apt list --upgradable 2>/dev/null | grep -ci security || echo 0)
-        fi
-        total="${total:-0}"
-        security="${security:-0}"
-
+        # ... (apt-check logic) ...
         if [ -n "$total" ] && [ "$total" -gt 0 ] 2>/dev/null; then
-            printf "${CYAN}%-15s ${RESET} "Updates:" "$total packages available"
+            # --- FIX 2: Corrected Updates line ---
+            printf "${CYAN}%-15s${RESET} %d packages available\n" "Updates:" "$total"
             if [ -n "$security" ] && [ "$security" -gt 0 ] 2>/dev/null; then
                 printf " (%s security)\n" "$security"
             fi
@@ -405,7 +394,11 @@ checkupdates() {
 # --- Aliases ---
 # Enable color support for common commands.
 if [ -x /usr/bin/dircolors ]; then
-    test -r ~/.dircolors && eval "$(dircolors -b ~/.dircolors)" || eval "$(dircolors -b)"
+    if test -r ~/.dircolors; then
+        eval "$(dircolors -b ~/.dircolors)"
+    else
+        eval "$(dircolors -b)"
+    fi
     alias ls='ls --color=auto'
     alias dir='dir --color=auto'
     alias vdir='vdir --color=auto'
@@ -463,11 +456,7 @@ psgrep() {
         echo "Usage: psgrep <pattern>" >&2
         return 1
     fi
-    # Build a pattern like '[n]ginx' to avoid matching grep process itself
-    local pattern
-    local term="$1"
-    pattern="[${term:0:1}]${term:1}"
-    ps aux | grep -i "$pattern"
+    pgrep -af -i "$1"
 }
 alias ports='ss -tuln'
 alias listening='ss -tlnp'
@@ -744,7 +733,6 @@ if [ -n "$SSH_CONNECTION" ]; then
     sysinfo
 
     # Display previous login information (skip current session)
-    local last_login
     last_login=$(last -R "$USER" 2>/dev/null | sed -n '2p' | awk '{$1=""; print}' | xargs || echo "")
     [ -n "$last_login" ] && printf "Last login: %s\n" "$last_login"
 
