@@ -102,4 +102,4 @@ jobs:
         with:
           sarif_file: results.sarif
           # Use a unique category to avoid conflicts with other security scans
-          category: codacy-security-scan
+          category: codacy-security-scan-${{ github.run_id }}
