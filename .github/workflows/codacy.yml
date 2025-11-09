@@ -90,8 +90,6 @@ jobs:
           verbose: true
           output: results.sarif
           format: sarif
-          # Exclude tools that are not relevant for this shell script project
-          tool: shellcheck,bandit,eslint,gosec
           # Adjust severity of non-security issues
           gh-code-scanning-compat: true
           # Force 0 exit code to allow SARIF file generation
