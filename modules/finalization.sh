@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================================================
-# du_setup.sh - Finalization Module
+# du_setup_modular.sh - Finalization Module
 # Handles cleanup, summary, and reboot
 # ============================================================================
 
@@ -47,6 +47,18 @@ generate_summary() {
             FAILED_SERVICES+=("$service")
         fi
     done
+
+    # Check OSSEC status
+    if command -v /var/ossec/bin/ossec-control >/dev/null 2>&1; then
+        if /var/ossec/bin/ossec-control status | grep -q "is running"; then
+            printf "  %-20s ${GREEN}✓ Active${NC}\n" "ossec"
+        else
+            printf "  %-20s ${RED}✗ INACTIVE${NC}\n" "ossec"
+            FAILED_SERVICES+=("ossec")
+        fi
+    else
+        printf "  %-20s ${RED}✗ Not Installed${NC}\n" "ossec"
+    fi
     if ufw status | grep -q "Status: active"; then
         printf "  %-20s ${GREEN}✓ Active${NC}\n" "ufw (firewall)"
     else
@@ -198,6 +210,9 @@ generate_summary() {
     printf "  %-28s ${CYAN}%s${NC}\n" "- Time sync:" "chronyc tracking"
     printf "  %-28s ${CYAN}%s${NC}\n" "- Fail2Ban sshd jail:" "sudo fail2ban-client status sshd"
     printf "  %-28s ${CYAN}%s${NC}\n" "- Fail2Ban ufw jail:" "sudo fail2ban-client status ufw-probes"
+    printf "  %-28s ${CYAN}%s${NC}\n" "- OSSEC status:" "sudo /var/ossec/bin/ossec-control status"
+    printf "  %-28s ${CYAN}%s${NC}\n" "- OSSEC alerts:" "sudo tail -f /var/ossec/logs/alerts/alerts.log"
+    printf "  %-28s ${CYAN}%s${NC}\n" "- Rootkit scan:" "sudo chkrootkit && sudo rkhunter --check"
     printf "  %-28s ${CYAN}%s${NC}\n" "- Swap status:" "sudo swapon --show && free -h"
     printf "  %-28s ${CYAN}%s${NC}\n" "- Kernel settings:" "sudo sysctl fs.protected_hardlinks kernel.yama.ptrace_scope"
     if command -v docker >/dev/null 2>&1; then

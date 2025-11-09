@@ -7,7 +7,7 @@
 
 -----
 
-**Version:** v0.74-modular
+**Version:** v0.74.2_modular
 
 **Last Updated:** 2025-11-08
 
@@ -69,14 +69,13 @@ The modular version maintains full compatibility with the original script's func
   * Automated scanning with scheduled reports
 * **Advanced Security Tools**: Enhanced security with additional tools:
   * **AIDE** (Advanced Intrusion Detection Environment) for file integrity monitoring
-  * **AppArmor** security profiles for application confinement
   * Extended kernel hardening with AMD EPYC optimizations
 * **Safety First**: Backs up critical configuration files before modification, stored in `/root/setup_harden_backup_*`.
 * **Optional Software**: Offers interactive installation of:
   * Docker & Docker Compose
   * Tailscale (Mesh VPN)
   * Nginx Web Server (containerized or host-based)
-  * Advanced security tools (AIDE, AppArmor)
+  * Advanced security tools (AIDE)
 * **Comprehensive Logging**: Logs all actions to `/var/log/du_setup_*.log`.
 * **Automation-Friendly**: Supports `--quiet` mode for automated provisioning.
 

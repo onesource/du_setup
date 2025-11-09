@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================================================
-# du_setup.sh - Nginx Module
+# du_setup_modular.sh - Nginx Module
 # Handles Nginx installation (containerized or host-based)
 # ============================================================================
 

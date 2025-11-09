@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================================================
-# du_setup.sh - Backup Configuration Module
+# du_setup_modular.sh - Backup Configuration Module
 # Handles rsync backup configuration and setup
 # ============================================================================
 

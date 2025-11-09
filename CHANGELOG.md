@@ -31,7 +31,6 @@
   - Automated scanning with scheduled reports
 - **Advanced Security Tools** (enhancements to `security_tools.sh`)
   - AIDE (Advanced Intrusion Detection Environment) for file integrity monitoring
-  - AppArmor security profiles for application confinement
   - Extended kernel hardening with AMD EPYC optimizations
 
 ### Key Improvements

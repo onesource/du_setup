@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================================================
-# du_setup.sh - SSH Configuration Module
+# du_setup_modular.sh - SSH Configuration Module
 # Handles SSH hardening, port changes, and service management
 # ============================================================================
 
@@ -81,18 +81,28 @@ configure_ssh() {
         return 1
     fi
 
-    # Apply port override
-    if [[ $ID == "ubuntu" ]] && dpkg --compare-versions "$(lsb_release -rs)" ge "24.04"; then
-        print_info "Updating SSH port in /etc/ssh/sshd_config for Ubuntu 24.04+..."
-        if ! grep -q "^Port" /etc/ssh/sshd_config; then echo "Port $SSH_PORT" >> /etc/ssh/sshd_config; else sed -i "s/^Port .*/Port $SSH_PORT/" /etc/ssh/sshd_config; fi
-    elif [[ "$SSH_SERVICE" == "ssh.socket" ]]; then
-        print_info "Configuring SSH socket to listen on port $SSH_PORT..."
-        mkdir -p /etc/systemd/systemd.socket.d
-        printf '%s\n' "[Socket]" "ListenStream=" " "ListenStream=$SSH_PORT" > /etc/systemd/systemd.socket.d/override.conf
+    # Apply port override - simpler and more reliable approach
+    print_info "Configuring SSH to listen on port $SSH_PORT..."
+
+    # First, update the sshd_config file directly
+    if grep -q "^Port " /etc/ssh/sshd_config; then
+        sed -i "s/^Port .*/Port $SSH_PORT/" /etc/ssh/sshd_config
     else
-        print_info "Configuring SSH service to listen on port $SSH_PORT..."
-        mkdir -p "/etc/systemd/systemd/${SSH_SERVICE}.d"
-        printf '%s\n' "[Service]" "ExecStart=" " "ExecStart=/usr/sbin/sshd -D -p $SSH_PORT" > "/etc/systemd/systemd/${SSH_SERVICE}.d/override.conf"
+        # Add Port directive at the beginning of the file
+        sed -i "1i Port $SSH_PORT" /etc/ssh/sshd_config
+    fi
+
+    # For Ubuntu 24.04+ with socket activation, also update the socket
+    if [[ $ID == "ubuntu" ]] && dpkg --compare-versions "$(lsb_release -rs)" ge "24.04" && systemctl list-unit-files | grep -q "^ssh.socket"; then
+        print_info "Also updating SSH socket configuration for Ubuntu 24.04+..."
+        mkdir -p /etc/systemd/system/ssh.socket.d
+        cat > /etc/systemd/system/ssh.socket.d/port.conf << EOF
+[Socket]
+ListenStream=
+ListenStream=$SSH_PORT
+EOF
+        systemctl daemon-reload
+        systemctl restart ssh.socket
     fi
 
     # Apply additional hardening
@@ -129,8 +139,8 @@ EOF
             print_error "Aborting SSH configuration."
             rm -f /etc/ssh/sshd_config.d/99-hardening.conf
             rm -f /etc/issue.net
-            rm -f /etc/systemd/systemd.socket.d/override.conf 2>/dev/null || true
-            rm -f "/etc/systemd/systemd/${SSH_SERVICE}.d/override.conf" 2>/dev/null || true
+            rm -f /etc/systemd/system/ssh.socket.d/override.conf 2>/dev/null || true
+            rm -f "/etc/systemd/system/${SSH_SERVICE}.d/override.conf" 2>/dev/null || true
             systemctl daemon-reload
             return 1
         fi
@@ -226,7 +236,7 @@ rollback_ssh_changes() {
     fi
 
     # Remove systemd overrides for both service and socket
-    if ! rm -rf /etc/systemd/systemd.socket.d /etc/systemd/systemd/sshd.service.d 2>/dev/null; then
+    if ! rm -rf /etc/systemd/system/ssh.socket.d /etc/systemd/system/sshd.service.d /etc/systemd/system/ssh.service.d 2>/dev/null; then
         print_warning "Could not remove one or more systemd override directories."
         log "Rollback warning: Failed to remove systemd overrides."
     else
@@ -255,15 +265,23 @@ rollback_ssh_changes() {
         print_info "Applying a systemd override to ensure rollback to port $PREVIOUS_SSH_PORT..."
         log "Rollback: Creating override to enforce port $PREVIOUS_SSH_PORT."
         if [[ "$USE_SOCKET" == true ]]; then
-            mkdir -p /etc/systemd/systemd.socket.d
-            printf '%s\n' "[Socket]" "ListenStream=" " "ListenStream=$PREVIOUS_SSH_PORT" > /etc/systemd/systemd.socket.d/override.conf
+            mkdir -p /etc/systemd/system/ssh.socket.d
+            cat > /etc/systemd/system/ssh.socket.d/override.conf << EOF
+[Socket]
+ListenStream=
+ListenStream=$PREVIOUS_SSH_PORT
+EOF
         else
             local service_for_rollback="ssh.service"
             if systemctl list-units --full -all --no-pager | grep -qE "[[:space:]]sshd.service[[:space:]]"; then
                 service_for_rollback="sshd.service"
             fi
-            mkdir -p "/etc/systemd/systemd/${service_for_rollback}.d"
-            printf '%s\n' "[Service]" "ExecStart=" " "ExecStart=/usr/sbin/sshd -D -p $PREVIOUS_SSH_PORT" > "/etc/systemd/systemd/${service_for_rollback}.d/override.conf"
+            mkdir -p "/etc/systemd/system/${service_for_rollback}.d"
+            cat > "/etc/systemd/system/${service_for_rollback}.d/override.conf" << EOF
+[Service]
+ExecStart=
+ExecStart=/usr/sbin/sshd -D -p $PREVIOUS_SSH_PORT
+EOF
         fi
     else
         print_error "Backup file not found at $SSHD_BACKUP_FILE."
@@ -398,7 +416,7 @@ cleanup_and_exit() {
         fi
 
         rollback_ssh_changes
-        if [[ $? -ne 0 ]]; then
+        if ! rollback_ssh_changes; then
             print_error "Rollback failed. SSH may not be accessible. Please check 'systemctl status $SSH_SERVICE' and 'journalctl -u $SSH_SERVICE'."
         else
             print_success "Rollback successful. SSH restored on original port $PREVIOUS_SSH_PORT."

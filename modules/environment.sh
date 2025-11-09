@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================================================
-# du_setup.sh - Environment Detection Module
+# du_setup_modular.sh - Environment Detection Module
 # Detects whether running in cloud VPS, bare metal, or container
 # ============================================================================
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================================================
-# du_setup.sh - Optional Installs Module
+# du_setup_modular.sh - Optional Installs Module
 # Handles Docker and Tailscale installation
 # ============================================================================
 

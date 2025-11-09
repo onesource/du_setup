@@ -44,3 +44,7 @@ Temporary Items
 readme/
 RELEASE_GUIDE.md
 run_modular_script_on_netcup.md
+deploy_from_github.sh
+shellcheck_report.md
+.codacy.yml
+.codacy

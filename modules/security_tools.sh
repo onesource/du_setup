@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================================================
-# du_setup.sh - Security Tools Module
+# du_setup_modular.sh - Security Tools Module
 # Handles Fail2ban, auto-updates, and kernel hardening
 # ============================================================================
 
@@ -228,7 +228,7 @@ EOF
     fi
 }
 
-# --- c Function ---
+# --- AIDE Installation Function ---
 install_aide() {
     if ! confirm "Install AIDE for intrusion detection?"; then
         return 0
@@ -247,21 +247,12 @@ install_aide() {
     print_success "AIDE installed and configured"
 }
 
-# --- AppArmor Configuration Function ---
-configure_apparmor() {
-    if ! confirm "Configure AppArmor security profiles?"; then
-        return 0
+# --- AppArmor Check Function ---
+check_apparmor() {
+    print_section "Checking AppArmor status"
+    if aa-status --enabled >/dev/null 2>&1; then
+        print_success "AppArmor is enabled and running"
+    else
+        print_error "AppArmor is disabled — consider enabling it"
     fi
-
-    print_section "Configuring AppArmor"
-
-    # Ensure AppArmor is enabled
-    systemctl enable apparmor
-    systemctl start apparmor
-
-    # Set profiles to complain mode initially
-    aa-complain /etc/apparmor.d/*
-
-    print_success "AppArmor configured in complain mode"
-    print_info "Run 'aa-enforce /etc/apparmor.d/*' after testing to enforce profiles"
 }

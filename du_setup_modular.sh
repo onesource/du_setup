@@ -2,7 +2,7 @@
 
 # ============================================================================
 # Debian and Ubuntu Server Hardening Interactive Script (Modular Version)
-# Version: 0.74-modular | 2025-10-22
+# Version: 0.74.2_modular | 2025-11-09
 #
 # This is the modular version of du_setup.sh that sources separate modules
 # for better maintainability and organization.
@@ -112,8 +112,9 @@ init_config
 # 9. nginx.sh - Depends on optional_installs.sh (for Docker)
 # 10. backup_config.sh - No dependencies
 # 11. additional_config.sh - No dependencies
-# 12. provider_cleanup.sh - No dependencies
-# 13. finalization.sh - Depends on all other modules
+# 12. database_security.sh - No dependencies (optional, runs only if databases detected)
+# 13. provider_cleanup.sh - No dependencies
+# 14. finalization.sh - Depends on all other modules
 #
 # Each module can be enabled/disabled by commenting/uncommenting the source line
 # AND the corresponding function calls in main() below.
@@ -124,11 +125,13 @@ source "$SCRIPT_DIR/modules/user_management.sh"
 source "$SCRIPT_DIR/modules/ssh_config.sh"
 source "$SCRIPT_DIR/modules/firewall.sh"
 source "$SCRIPT_DIR/modules/security_tools.sh"
+source "$SCRIPT_DIR/modules/intrusion_detection.sh"
 source "$SCRIPT_DIR/modules/optional_installs.sh"
 source "$SCRIPT_DIR/modules/nginx.sh"
 source "$SCRIPT_DIR/modules/backup_config.sh"
 source "$SCRIPT_DIR/modules/additional_config.sh"
 source "$SCRIPT_DIR/modules/provider_cleanup.sh"
+source "$SCRIPT_DIR/modules/database_security.sh"
 source "$SCRIPT_DIR/modules/finalization.sh"
 
 # --- Error Handler ---
@@ -190,13 +193,14 @@ main() {
     # 9. configure_time_sync() - Configure time synchronization
     # 10. configure_kernel_hardening() - Apply kernel security settings
     # 11. install_aide() - Install file integrity monitoring
-    # 12. configure_apparmor() - Configure AppArmor profiles
+    # 12. check_apparmor() - Check AppArmor profiles
     # 13. install_docker() - Optional Docker installation
     # 14. install_tailscale() - Optional Tailscale installation
     # 15. install_nginx() - Optional Nginx installation (container/host)
     # 16. setup_backup() - Configure backup system
     # 17. configure_swap() - Configure swap space
     # 18. configure_security_audit() - Set up security auditing
+    # 19. configure_database_security() - Optional database security (runs only if databases detected)
 
     collect_config
     install_packages
@@ -209,13 +213,15 @@ main() {
     configure_time_sync
     configure_kernel_hardening
     install_aide
-    configure_apparmor
+    check_apparmor
+    configure_intrusion_detection
     install_docker
     install_tailscale
     install_nginx
     setup_backup
     configure_swap
     configure_security_audit
+    configure_database_security
 
     # --- PROVIDER PACKAGE CLEANUP ---
     if [[ "$SKIP_CLEANUP" == "false" ]]; then

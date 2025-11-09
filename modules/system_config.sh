@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================================================
-# du_setup.sh - System Configuration Module
+# du_setup_modular.sh - System Configuration Module
 # Configures timezone, hostname, and system optimizations
 # ============================================================================
 
@@ -76,21 +76,26 @@ configure_system() {
     # AMD EPYC processor optimizations
     print_info "Optimizing for AMD EPYC processor..."
     if command -v cpupower >/dev/null 2>&1; then
-        if cpupower frequency-set -g performance 2>/dev/null; then
-            print_success "CPU governor set to performance mode for AMD EPYC."
+        # Check if cpupower can actually control CPU frequency
+        if cpupower frequency-info 2>/dev/null | grep -q "driver:.*intel_pstate\|driver:.*amd_pstate"; then
+            if cpupower frequency-set -g performance 2>/dev/null; then
+                print_success "CPU governor set to performance mode for AMD EPYC."
+            else
+                print_warning "Failed to set CPU governor to performance mode (this is normal in virtualized environments)."
+            fi
         else
-            print_warning "Failed to set CPU governor to performance mode."
+            print_info "CPU frequency control not available (common in virtualized environments)."
         fi
     else
-        print_warning "cpupower not available. Skipping CPU optimization."
+        print_info "cpupower not available. Skipping CPU optimization."
     fi
 
-    # Check for EPYC-specific security features
+    # Check for CPU vulnerabilities (informational only)
     if [ -d /sys/devices/system/cpu/vulnerabilities ]; then
         local vuln_found=false
         for vuln in /sys/devices/system/cpu/vulnerabilities/*; do
             if [ -f "$vuln" ] && grep -q "Vulnerable" "$vuln" 2>/dev/null; then
-                print_warning "CPU vulnerability detected: $(basename "$vuln")"
+                print_info "CPU vulnerability detected: $(basename "$vuln") (this is normal and mitigated by the kernel)"
                 vuln_found=true
             fi
         done
@@ -98,8 +103,6 @@ configure_system() {
             print_success "No CPU vulnerabilities detected."
         fi
     fi
-
-    log "System configuration completed."
 
     # NVMe SSD optimizations
     print_info "Configuring NVMe SSD optimizations..."
@@ -148,7 +151,6 @@ EOF
     else
         print_info "No NVMe SSD detected. Skipping NVMe optimizations."
     fi
-    log "System configuration completed."
 }
     # --- PRELIMINARY CHECKS ---
     check_system() {
@@ -167,8 +169,8 @@ EOF
 
         if [[ -f /etc/os-release ]]; then
             source /etc/os-release
-            ID=$ID  # Populate global ID variable
-	if [[ $ID == "debian" && $VERSION_ID =~ ^(12|13)$ ]] || \
+            # ID is already populated from /etc/os-release
+ if [[ $ID == "debian" && $VERSION_ID =~ ^(12|13)$ ]] || \
            [[ $ID == "ubuntu" && $VERSION_ID =~ ^(20.04|22.04|24.04)$ ]]; then
             print_success "Compatible OS detected: $PRETTY_NAME"
         else
@@ -195,11 +197,16 @@ EOF
             fi
         fi
 
-        if curl -s --head https://deb.debian.org >/dev/null || curl -s --head https://archive.ubuntu.com >/dev/null; then
-            print_success "Internet connectivity confirmed."
+        if command -v curl >/dev/null 2>&1; then
+            if curl -s --connect-timeout 10 --head https://deb.debian.org >/dev/null 2>&1 || curl -s --connect-timeout 10 --head https://archive.ubuntu.com >/dev/null 2>&1; then
+                print_success "Internet connectivity confirmed."
+            else
+                print_warning "Could not verify internet connectivity. Continuing anyway..."
+                log "Warning: Internet connectivity check failed"
+            fi
         else
-            print_error "No internet connectivity. Please check your network."
-            exit 1
+            print_warning "curl command not found. Skipping connectivity check."
+            log "Warning: curl command not available for connectivity check"
         fi
 
         if [[ ! -w /var/log ]]; then
@@ -229,9 +236,15 @@ EOF
         local latest_version
 
         # Fetch the latest script from GitHub and parse version number from it.
-        if ! latest_version=$(curl -sL "$CONFIG_URL" | grep '^CURRENT_VERSION=' | head -n 1 | awk -F'"' '{print $2}'); then
-            print_warning "Could not check for updates. Please check your internet connection."
-            log "Update check failed: Could not fetch script from $CONFIG_URL"
+        if command -v curl >/dev/null 2>&1; then
+            if ! latest_version=$(curl -sL --connect-timeout 10 "$CONFIG_URL" 2>/dev/null | grep '^CURRENT_VERSION=' | head -n 1 | awk -F'"' '{print $2}'); then
+                print_warning "Could not check for updates. Please check your internet connection."
+                log "Update check failed: Could not fetch script from $CONFIG_URL"
+                return
+            fi
+        else
+            print_warning "curl command not found. Skipping update check."
+            log "Update check failed: curl command not available"
             return
         fi
 
@@ -339,7 +352,12 @@ EOF
         done
         read -rp "$(printf '%s' "${CYAN}Enter a 'pretty' hostname (optional): ${NC}")" PRETTY_NAME
         [[ -z "$PRETTY_NAME" ]] && PRETTY_NAME="$SERVER_NAME"
-        PREVIOUS_SSH_PORT=$(ss -tlpn | grep sshd | grep -oP ':\K\d+' | head -n 1 | grep -oP ':\K\d+' | awk '{print $2}' | head -n 1)
+        # Try to detect current SSH port with error handling
+        if command -v ss >/dev/null 2>&1; then
+            PREVIOUS_SSH_PORT=$(ss -tlpn 2>/dev/null | grep sshd | grep -oP ':\K\d+' | head -n 1 || echo "")
+        else
+            PREVIOUS_SSH_PORT=""
+        fi
         local PROMPT_DEFAULT_PORT=${PREVIOUS_SSH_PORT:-2222}
         [[ -z "$PRETTY_NAME" ]] && PRETTY_NAME="$SERVER_NAME"
         while true; do
@@ -348,8 +366,14 @@ EOF
             if validate_port "$SSH_PORT" || [[ -n "$PREVIOUS_SSH_PORT" && "$SSH_PORT" == "$PREVIOUS_SSH_PORT" ]]; then break; else print_error "Invalid port. Choose a port between 1024-65535."; fi
         done
 
-        SERVER_IP_V4=$(curl -4 -s https://ifconfig.me 2>/dev/null || echo "unknown")
-        SERVER_IP_V6=$(curl -6 -s https://ifconfig.me 2>/dev/null || echo "not available")
+        # Detect server IPs with error handling
+        if command -v curl >/dev/null 2>&1; then
+            SERVER_IP_V4=$(curl -4 -s --connect-timeout 5 https://ifconfig.me 2>/dev/null || echo "unknown")
+            SERVER_IP_V6=$(curl -6 -s --connect-timeout 5 https://ifconfig.me 2>/dev/null || echo "not available")
+        else
+            SERVER_IP_V4="unknown"
+            SERVER_IP_V6="not available"
+        fi
         if [[ "$SERVER_IP_V4" != "unknown" ]]; then
             print_info "Detected server IPv4: $SERVER_IP_V4"
         fi

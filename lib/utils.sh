@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================================================
-# du_setup.sh - Shared Utilities Library
+# du_setup_modular.sh - Shared Utilities Library
 # Common functions used across multiple modules
 # ============================================================================
 
@@ -37,7 +37,7 @@ print_header() {
     printf '%s\n' "${CYAN}╔═════════════════════════════════════════════════════════════════╗${NC}"
     printf '%s\n' "${CYAN}║                                                                 ║${NC}"
     printf '%s\n' "${CYAN}║       DEBIAN/UBUNTU SERVER SETUP AND HARDENING SCRIPT           ║${NC}"
-    printf '%s\n' "${CYAN}║                v0.74.01_modular | 2025-11-08                    ║${NC}"
+    printf '%s\n' "${CYAN}║                 v0.74.2_modular | 2025-11-08                    ║${NC}"
     printf '%s\n' "${CYAN}║                                                                 ║${NC}"
     printf '%s\n' "${CYAN}╚═════════════════════════════════════════════════════════════════╝${NC}"
     printf '\n'

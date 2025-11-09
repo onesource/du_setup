@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================================================
-# du_setup.sh - Additional Configuration Module
+# du_setup_modular.sh - Additional Configuration Module
 # Handles swap configuration, time sync, and security audit
 # ============================================================================
 

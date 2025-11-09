@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================================================
-# du_setup.sh - Nginx Vulnerability Management Module
+# du_setup_modular.sh - Nginx Vulnerability Management Module
 # Handles security scanning, CVE monitoring, and vulnerability assessment
 # ============================================================================
 

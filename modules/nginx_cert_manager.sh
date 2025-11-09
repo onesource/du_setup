@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================================================
-# du_setup.sh - Nginx Certificate Management Module
+# du_setup_modular.sh - Nginx Certificate Management Module
 # Handles SSL/TLS certificate generation, renewal, and management
 # ============================================================================
 

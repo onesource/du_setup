@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================================================
-# du_setup.sh - Firewall Configuration Module
+# du_setup_modular.sh - Firewall Configuration Module
 # Handles UFW firewall setup and configuration
 # ============================================================================
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================================================
-# du_setup.sh - Provider Package Cleanup Module
+# du_setup_modular.sh - Provider Package Cleanup Module
 # Removes provider-specific packages and configurations
 # ============================================================================
 

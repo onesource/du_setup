@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================================================
-# du_setup.sh - Configuration Module
+# du_setup_modular.sh - Configuration Module
 # Global variables and configuration settings
 # ============================================================================
 

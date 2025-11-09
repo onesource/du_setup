@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================================================
-# du_setup.sh - Nginx Monitoring and Logging Module
+# du_setup_modular.sh - Nginx Monitoring and Logging Module
 # Handles security monitoring, log analysis, and alerting
 # ============================================================================
 

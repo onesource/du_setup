@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================================================
-# du_setup.sh - User Management Module
+# du_setup_modular.sh - User Management Module
 # Handles user creation, SSH key management, and custom .bashrc setup
 # ============================================================================
 
