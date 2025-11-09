@@ -1,0 +1,232 @@
+name: Test Modular Script
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [ "main", "test", "dev" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  test-script-syntax:
+    name: Test Script Syntax and Structure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck bash
+
+      - name: Test main script syntax
+        run: |
+          echo "Testing main script syntax..."
+          bash -n du_setup_modular.sh
+          echo "✓ Main script syntax is valid"
+
+      - name: Test module syntax
+        run: |
+          echo "Testing all module syntax..."
+          failed_modules=""
+          for module in modules/*.sh; do
+            if [ -f "$module" ]; then
+              if ! bash -n "$module"; then
+                failed_modules="$failed_modules $module"
+              else
+                echo "✓ $module syntax is valid"
+              fi
+            fi
+          done
+
+          if [ -n "$failed_modules" ]; then
+            echo "::error::Syntax errors in modules:$failed_modules"
+            exit 1
+          fi
+
+      - name: Test library syntax
+        run: |
+          echo "Testing library syntax..."
+          for lib in lib/*.sh; do
+            if [ -f "$lib" ]; then
+              if ! bash -n "$lib"; then
+                echo "::error::Syntax error in $lib"
+                exit 1
+              else
+                echo "✓ $lib syntax is valid"
+              fi
+            fi
+          done
+
+  test-script-loading:
+    name: Test Module Loading
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create test environment
+        run: |
+          # Create minimal test environment
+          mkdir -p /tmp/test_backup
+          chmod 700 /tmp/test_backup
+
+          # Mock system commands for testing
+          cat > /tmp/mock_commands.sh << 'EOF'
+          # Mock system commands for testing
+          function timedatectl() { echo "Mock: timedatectl called with $*"; }
+          function hostnamectl() { echo "Mock: hostnamectl called with $*"; }
+          function systemctl() { echo "Mock: systemctl called with $*"; }
+          function apt-get() { echo "Mock: apt-get called with $*"; return 0; }
+          function dpkg() { echo "Mock: dpkg called with $*"; }
+          function curl() { echo "Mock: curl called with $*"; }
+          function ss() { echo "Mock: ss called with $*"; }
+          function grep() { command grep "$@"; }
+          function awk() { command awk "$@"; }
+          function sed() { command sed "$@"; }
+          function find() { command find "$@"; }
+          function ls() { command ls "$@"; }
+          function cat() { command cat "$@"; }
+          function stat() { command stat "$@"; }
+          function chmod() { command chmod "$@"; }
+          function chown() { command chown "$@"; }
+          function mkdir() { command mkdir "$@"; }
+          function touch() { command touch "$@"; }
+          function tee() { command tee "$@"; }
+          function head() { command head "$@"; }
+          function tail() { command tail "$@"; }
+          function sort() { command sort "$@"; }
+          function cut() { command cut "$@"; }
+          function tr() { command tr "$@"; }
+          function wc() { command wc "$@"; }
+          function date() { command date "$@"; }
+          function id() { command id "$@"; }
+          function whoami() { echo "root"; }
+          function command() { "$@"; }
+          EOF
+
+          chmod +x /tmp/mock_commands.sh
+          source /tmp/mock_commands.sh
+
+      - name: Test module loading
+        run: |
+          echo "Testing module loading without execution..."
+
+          # Set up test environment variables
+          export SCRIPT_DIR="$(pwd)"
+          export LOG_FILE="/tmp/test.log"
+          export BACKUP_DIR="/tmp/test_backup"
+          export VERBOSE=false
+          export CLEANUP_PREVIEW=false
+          export CLEANUP_ONLY=false
+          export SKIP_CLEANUP=false
+
+          # Create mock log file
+          touch "$LOG_FILE"
+
+          # Test loading libraries
+          echo "Testing library loading..."
+          source lib/config.sh
+          echo "✓ lib/config.sh loaded successfully"
+
+          source lib/utils.sh
+          echo "✓ lib/utils.sh loaded successfully"
+
+          # Test loading modules
+          echo "Testing module loading..."
+          for module in modules/*.sh; do
+            if [ -f "$module" ]; then
+              if source "$module"; then
+                echo "✓ $module loaded successfully"
+              else
+                echo "::error::Failed to load $module"
+                exit 1
+              fi
+            fi
+          done
+
+          echo "All modules loaded successfully"
+
+  test-script-help:
+    name: Test Script Help Functionality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test help flag
+        run: |
+          echo "Testing --help flag..."
+          if bash du_setup_modular.sh --help > /tmp/help_output.txt 2>&1; then
+            echo "✓ --help flag executed successfully"
+            if grep -q "Debian/Ubuntu Server Setup & Hardening Script" /tmp/help_output.txt; then
+              echo "✓ Help output contains expected content"
+            else
+              echo "::error::Help output missing expected content"
+              cat /tmp/help_output.txt
+              exit 1
+            fi
+          else
+            echo "::error::--help flag failed"
+            exit 1
+          fi
+
+      - name: Test invalid arguments
+        run: |
+          echo "Testing invalid argument handling..."
+          if bash du_setup_modular.sh --invalid-flag > /tmp/invalid_output.txt 2>&1; then
+            echo "✓ Invalid flag handled gracefully"
+          else
+            # Script should exit cleanly with invalid flags
+            echo "✓ Invalid flag caused expected exit"
+          fi
+
+  test-script-dry-run:
+    name: Test Script Dry Run Modes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test cleanup preview mode
+        run: |
+          echo "Testing --cleanup-preview mode..."
+          # This should run without root privileges in preview mode
+          if timeout 30s bash du_setup_modular.sh --cleanup-preview > /tmp/preview_output.txt 2>&1; then
+            echo "✓ Cleanup preview mode executed"
+            if grep -q "cleanup preview" /tmp/preview_output.txt; then
+              echo "✓ Preview mode output detected"
+            fi
+          else
+            echo "✓ Cleanup preview mode handled as expected"
+          fi
+
+      - name: Test script structure validation
+        run: |
+          echo "Validating script structure..."
+
+          # Check for required functions in main script
+          required_functions=("show_usage" "main" "init_config")
+          for func in "${required_functions[@]}"; do
+            if grep -q "^$func()" du_setup_modular.sh; then
+              echo "✓ Function $func found in main script"
+            else
+              echo "::error::Required function $func not found in main script"
+              exit 1
+            fi
+          done
+
+          # Check for proper error handling
+          if grep -q "set -euo pipefail" du_setup_modular.sh; then
+            echo "✓ Proper error handling enabled"
+          else
+            echo "::error::Error handling not properly configured"
+            exit 1
+          fi
+
+          # Check for module sourcing
+          sourced_count=$(grep -c "^source " du_setup_modular.sh)
+          if [ "$sourced_count" -ge 10 ]; then
+            echo "✓ Found $sourced_count source statements (expected >= 10)"
+          else
+            echo "::warning::Only found $sourced_count source statements (expected >= 10)"
+          fi

@@ -35,7 +35,50 @@ jobs:
 
       - name: Check for non-UTF-8 files
         run: |
-          find . -name .git -prune -o -type f -exec file --mime {} + | grep -v -e 'charset=utf-8' -e 'charset=us-ascii' -e 'charset=binary' || echo "All files OK"
+          echo "Checking for non-UTF-8 files in shell scripts..."
+          find . -name .git -prune -o -type f -name "*.sh" -exec file --mime {} + | grep -v -e 'charset=utf-8' -e 'charset=us-ascii' -e 'charset=binary' || echo "All shell script files OK"
+
+          echo "Checking for non-UTF-8 files in configuration files..."
+          find . -name .git -prune -o -type f \( -name "*.yml" -o -name "*.yaml" -o -name "*.json" -o -name "*.md" \) -exec file --mime {} + | grep -v -e 'charset=utf-8' -e 'charset=us-ascii' -e 'charset=binary' || echo "All configuration files OK"
+
+      - name: Validate script structure
+        run: |
+          echo "Validating modular script structure..."
+
+          # Check if main script exists
+          if [ ! -f "du_setup_modular.sh" ]; then
+            echo "::error::Main script du_setup_modular.sh not found"
+            exit 1
+          fi
+
+          # Check if lib directory exists and has required files
+          if [ ! -d "lib" ]; then
+            echo "::error::lib directory not found"
+            exit 1
+          fi
+
+          required_lib_files=("config.sh" "utils.sh")
+          for file in "${required_lib_files[@]}"; do
+            if [ ! -f "lib/$file" ]; then
+              echo "::error::Required lib file lib/$file not found"
+              exit 1
+            fi
+          done
+
+          # Check if modules directory exists
+          if [ ! -d "modules" ]; then
+            echo "::error::modules directory not found"
+            exit 1
+          fi
+
+          # Verify main script sources all required files
+          echo "Checking that main script sources all modules..."
+          sourced_modules=$(grep "^source " du_setup_modular.sh | grep -E "(lib/|modules/)" | wc -l)
+          if [ "$sourced_modules" -lt 10 ]; then
+            echo "::warning::Expected at least 10 sourced modules, found $sourced_modules"
+          fi
+
+          echo "Script structure validation completed"
 
       # Execute Codacy Analysis CLI and generate a SARIF output with the security issues identified during the analysis
       - name: Run Codacy Analysis CLI

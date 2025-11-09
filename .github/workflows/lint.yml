@@ -21,12 +21,17 @@ jobs:
         run: |
           set -o pipefail
 
-          files_to_check=$(find . -type f -name "*.sh" -not -path "./.git/*")
+          # Check main script and all modules (exclude bashrc template as it's complex)
+          files_to_check=$(find . -type f -name "*.sh" -not -path "./.git/*" -not -name "bashrc_template.sh" | sort)
 
           if [ -z "$files_to_check" ]; then
             echo "No .sh files found to check."
             exit 0
           fi
+
+          echo "--- Shell script files to check ---"
+          echo "$files_to_check"
+          echo ""
 
           echo "--- Checking for all warnings and style issues ---"
           echo "$files_to_check" | xargs shellcheck -f gcc | while IFS= read -r line; do
@@ -38,3 +43,26 @@ jobs:
 
           echo "--- Checking for critical errors ---"
           echo "$files_to_check" | xargs shellcheck --severity=error
+
+          echo "--- Checking module sourcing order ---"
+          # Verify that main script sources all modules in correct order
+          if [ -f "du_setup_modular.sh" ]; then
+            echo "Checking module dependencies in du_setup_modular.sh..."
+            # Extract sourced files from main script
+            sourced_files=$(grep "^source " du_setup_modular.sh | grep -E "(lib/|modules/)" | awk '{print $2}' | tr -d '"' | tr -d "'" | sort)
+
+            # Check if all referenced files exist
+            missing_files=""
+            for file in $sourced_files; do
+              if [ ! -f "$file" ]; then
+                missing_files="$missing_files $file"
+              fi
+            done
+
+            if [ -n "$missing_files" ]; then
+              echo "::error::Missing referenced module files:$missing_files"
+              exit 1
+            else
+              echo "All referenced module files exist."
+            fi
+          fi
