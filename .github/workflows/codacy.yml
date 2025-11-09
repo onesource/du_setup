@@ -123,6 +123,7 @@ jobs:
 
       # Upload the SARIF file generated in the previous step
       - name: Upload SARIF (Pylint)
+        if: ${{ steps.codacy.outputs.issues_count > 0 }}
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: results-pylint.sarif
@@ -145,6 +146,7 @@ jobs:
 
       # Upload the SARIF file generated in the previous step
       - name: Upload SARIF (ShellCheck)
+        if: ${{ steps.codacy.outputs.issues_count > 0 }}
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: results-shellcheck.sarif
@@ -167,6 +169,7 @@ jobs:
 
       # Upload the SARIF file generated in the previous step
       - name: Upload SARIF (Bandit)
+        if: ${{ steps.codacy.outputs.issues_count > 0 }}
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: results-bandit.sarif
@@ -189,6 +192,7 @@ jobs:
 
       # Upload the SARIF file generated in the previous step
       - name: Upload SARIF (Trivy)
+        if: ${{ steps.codacy.outputs.issues_count > 0 }}
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: results-trivy.sarif
