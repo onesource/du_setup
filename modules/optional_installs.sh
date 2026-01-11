@@ -156,6 +156,27 @@ install_tailscale() {
             print_error "Invalid key format. For standard connection, key must start with 'tskey-auth-'. For custom server, key cannot be empty."
         fi
     done
+    # Ensure tailscaled service is running before attempting to use tailscale command
+    if ! systemctl is-active --quiet tailscaled; then
+        print_info "Starting tailscaled service..."
+        systemctl enable --now tailscaled
+        # Wait a moment for the service to initialize
+        sleep 3
+    fi
+
+    # Make sure tailscale command is available in PATH
+    if ! command -v tailscale >/dev/null 2>&1; then
+        # Try to add common Tailscale installation paths to PATH
+        export PATH="$PATH:/usr/bin:/usr/local/bin"
+
+        # Check again after updating PATH
+        if ! command -v tailscale >/dev/null 2>&1; then
+            print_error "Tailscale command not found. Installation may have failed."
+            print_info "Please run the installation manually: curl -fsSL https://tailscale.com/install.sh | sh"
+            return 1
+        fi
+    fi
+
     local TS_COMMAND="tailscale up"
     if [[ "$TS_CONNECTION" == "2" ]]; then
         TS_COMMAND="$TS_COMMAND --login-server=$LOGIN_SERVER"
@@ -226,6 +247,25 @@ install_tailscale() {
             TS_FLAGS="$TS_FLAGS --accept-routes"
         fi
         if [[ -n "$TS_FLAGS" ]]; then
+            # Ensure tailscaled service is still running
+            if ! systemctl is-active --quiet tailscaled; then
+                print_info "Starting tailscaled service..."
+                systemctl enable --now tailscaled
+                sleep 3
+            fi
+
+            # Verify tailscale command is available
+            if ! command -v tailscale >/dev/null 2>&1; then
+                # Try to add common Tailscale installation paths to PATH
+                export PATH="$PATH:/usr/bin:/usr/local/bin"
+
+                # Check again after updating PATH
+                if ! command -v tailscale >/dev/null 2>&1; then
+                    print_error "Tailscale command not found. Cannot apply additional options."
+                    return 1
+                fi
+            fi
+
             TS_COMMAND="tailscale up"
             if [[ "$TS_CONNECTION" == "2" ]]; then
                 TS_COMMAND="$TS_COMMAND --login-server=$LOGIN_SERVER"
