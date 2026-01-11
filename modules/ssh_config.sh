@@ -17,7 +17,7 @@ configure_ssh() {
     local CURRENT_SSH_PORT USER_HOME SSH_DIR SSH_KEY AUTH_KEYS
 
     # Ensure openssh-server is installed
-    if ! dpkg -l openssh-server | grep -q ^ii; then
+    if ! dpkg -l openssh-server | grep -q "^ii"; then
         print_error "openssh-server package is not installed."
         return 1
     fi
@@ -81,28 +81,95 @@ configure_ssh() {
         return 1
     fi
 
-    # Apply port override - simpler and more reliable approach
+    # Apply port change
     print_info "Configuring SSH to listen on port $SSH_PORT..."
 
-    # First, update the sshd_config file directly
-    if grep -q "^Port " /etc/ssh/sshd_config; then
+    # Open the new SSH port in the host firewall if applicable to avoid locking out remote access
+    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+        print_info "Adding UFW rule to allow SSH on port $SSH_PORT..."
+        ufw allow "$SSH_PORT"/tcp >/dev/null 2>&1 || print_warning "Failed to add UFW rule for $SSH_PORT (check UFW)."
+        # Ensure rule applied immediately
+        ufw status numbered | grep -E "${SSH_PORT}|22" || true
+    elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+        print_info "Adding firewalld rule to allow SSH on port $SSH_PORT..."
+        firewall-cmd --permanent --add-port=${SSH_PORT}/tcp >/dev/null 2>&1 || print_warning "Failed to add firewalld rule for $SSH_PORT (check firewalld)."
+        firewall-cmd --reload >/dev/null 2>&1 || print_warning "Failed to reload firewalld after adding SSH port $SSH_PORT."
+    else
+        print_warning "No host firewall (UFW/firewalld) detected or active — ensure your VPS provider's edge firewall allows port $SSH_PORT/tcp."
+    fi
+
+    if grep -q "^Port\s" /etc/ssh/sshd_config; then
         sed -i "s/^Port .*/Port $SSH_PORT/" /etc/ssh/sshd_config
     else
         # Add Port directive at the beginning of the file
         sed -i "1i Port $SSH_PORT" /etc/ssh/sshd_config
     fi
 
-    # For Ubuntu 24.04+ with socket activation, also update the socket
-    if [[ $ID == "ubuntu" ]] && dpkg --compare-versions "$(lsb_release -rs)" ge "24.04" && systemctl list-unit-files | grep -q "^ssh.socket"; then
-        print_info "Also updating SSH socket configuration for Ubuntu 24.04+..."
+    # Handle systemd socket activation for Ubuntu 24.04+
+    if [[ "$SSH_SERVICE" == "ssh.socket" ]]; then
+        print_info "Updating SSH socket configuration for Ubuntu 24.04+..."
         mkdir -p /etc/systemd/system/ssh.socket.d
-        cat > /etc/systemd/system/ssh.socket.d/port.conf << EOF
+        cat > /etc/systemd/system/ssh.socket.d/override.conf << EOF
 [Socket]
 ListenStream=
-ListenStream=$SSH_PORT
+ListenStream=0.0.0.0:$SSH_PORT
+ListenStream=[::]:$SSH_PORT
 EOF
         systemctl daemon-reload
-        systemctl restart ssh.socket
+        log "Created socket override for port $SSH_PORT"
+
+        # CRITICAL: Stop the socket to release the old port binding
+        if systemctl is-active --quiet ssh.socket; then
+            if systemctl stop ssh.socket 2>/dev/null; then
+                print_info "Stopped ssh.socket to release old port binding."
+                log "Stopped ssh.socket successfully"
+            else
+                print_error "Failed to stop ssh.socket"
+                log "ERROR: Failed to stop ssh.socket"
+            fi
+        fi
+
+        # Restart ssh.service to ensure sshd is ready with new config
+        print_info "Restarting ssh.service with new configuration..."
+        if systemctl restart ssh.service 2>/dev/null; then
+            print_info "Restarted ssh.service successfully."
+            log "Restarted ssh.service successfully"
+        else
+            print_error "Failed to restart ssh.service. Checking status..."
+            systemctl status ssh.service --no-pager | tail -20
+            log "ERROR: Failed to restart ssh.service"
+            # Try to start it instead
+            if systemctl start ssh.service 2>/dev/null; then
+                print_info "Started ssh.service (restart failed but start succeeded)."
+                log "Started ssh.service after restart failed"
+            else
+                print_error "Failed to start ssh.service. Manual intervention may be required."
+            fi
+        fi
+
+        # Restart ssh.socket to apply new port configuration
+        print_info "Restarting ssh.socket on new port $SSH_PORT..."
+        if systemctl restart ssh.socket 2>/dev/null; then
+            print_info "Restarted ssh.socket with new port $SSH_PORT."
+            log "Restarted ssh.socket successfully on port $SSH_PORT"
+        else
+            print_error "Failed to restart ssh.socket. Checking status..."
+            systemctl status ssh.socket --no-pager | tail -20
+            log "ERROR: Failed to restart ssh.socket"
+            # Try to start it instead
+            if systemctl start ssh.socket 2>/dev/null; then
+                print_info "Started ssh.socket (restart failed but start succeeded)."
+                log "Started ssh.socket after restart failed"
+            else
+                print_error "Failed to start ssh.socket. Manual intervention may be required."
+            fi
+        fi
+    else
+        # Remove any existing systemd overrides that might conflict on non-socket systems
+        print_info "Removing any conflicting systemd overrides..."
+        rm -rf /etc/systemd/system/ssh.socket.d 2>/dev/null || true
+        rm -rf /etc/systemd/system/ssh.service.d 2>/dev/null || true
+        rm -rf /etc/systemd/system/sshd.service.d 2>/dev/null || true
     fi
 
     # Apply additional hardening
@@ -111,7 +178,7 @@ EOF
 PermitRootLogin no
 PasswordAuthentication no
 PubkeyAuthentication yes
-MaxAuthTries 3
+MaxAuthTries 6
 ClientAliveInterval 300
 X11Forwarding no
 PrintMotd no
@@ -123,6 +190,7 @@ AllowTcpForwarding no
 AllowAgentForwarding no
 TrustedUserCAKeys no
 PermitTunnel no
+AddressFamily any
 EOF
     tee /etc/issue.net > /dev/null <<'EOF'
 ******************************************************************************
@@ -132,6 +200,8 @@ EOF
 EOF
 
     print_info "Testing SSH configuration syntax..."
+    mkdir -p /run/sshd
+    chmod 755 /run/sshd
 	if ! sshd -t 2>&1 | tee -a "$LOG_FILE"; then
         print_warning "SSH configuration test detected potential issues (see above)."
         print_info "This may be due to existing configuration files on system."
@@ -145,13 +215,61 @@ EOF
             return 1
         fi
     fi
-    print_info "Reloading systemd and restarting SSH service..."
-    systemctl daemon-reload
-    systemctl restart "$SSH_SERVICE"
+    # For socket-activated systems, we already restarted services above
+    if [[ "$SSH_SERVICE" != "ssh.socket" ]]; then
+        print_info "Reloading systemd and restarting SSH service..."
+        systemctl daemon-reload
+
+        # Try to restart SSH service with fallback options
+        if ! systemctl restart "$SSH_SERVICE"; then
+            print_warning "Failed to restart $SSH_SERVICE. Trying alternative methods..."
+
+            # Try alternative service names
+            if [[ "$SSH_SERVICE" == "ssh.service" ]] && ! systemctl restart sshd.service; then
+                print_warning "Failed to restart sshd.service as well."
+            elif [[ "$SSH_SERVICE" == "sshd.service" ]] && ! systemctl restart ssh.service; then
+                print_warning "Failed to restart ssh.service as well."
+            fi
+
+            # Try manual start as last resort
+            print_info "Attempting manual SSH daemon start..."
+            pkill -f "sshd:.*" || true  # Kill existing sshd processes
+            timeout 5 /usr/sbin/sshd -D -f /etc/ssh/sshd_config &
+            sleep 3
+        fi
+    fi
+
     sleep 5
-    if ! ss -tuln | grep -q ":$SSH_PORT"; then
+    # Diagnostic: Check what ports are actually listening
+    print_info "Checking listening ports for SSH..."
+    ss -tuln | grep -E ":(22|$SSH_PORT) " || print_warning "No SSH ports found listening"
+    print_info "Checking for IPv4 and IPv6 bindings..."
+    ss -tuln | grep -E ":(22|$SSH_PORT) " | grep -E "0.0.0.0|::" || print_warning "No IPv4 or IPv6 bindings found"
+
+    # Diagnostic: Check service status
+    print_info "Checking SSH service status..."
+    systemctl status ssh.socket --no-pager -l | head -15
+    systemctl status ssh.service --no-pager -l | head -15
+
+    if ! ss -tuln | grep -q ":$SSH_PORT "; then
         print_error "SSH not listening on port $SSH_PORT after restart!"
-        return 1
+        print_warning "Attempting to restore SSH on original port $PREVIOUS_SSH_PORT..."
+
+        # Try to restore original port immediately
+        sed -i "s/^Port .*/Port $PREVIOUS_SSH_PORT/" /etc/ssh/sshd_config
+        systemctl restart "$SSH_SERVICE" 2>/dev/null || {
+            pkill -f "sshd:.*" || true
+            timeout 5 /usr/sbin/sshd -D -f /etc/ssh/sshd_config &
+        }
+        sleep 3
+
+        if ss -tuln | grep -q ":$PREVIOUS_SSH_PORT "; then
+            print_success "SSH restored on original port $PREVIOUS_SSH_PORT."
+            return 1
+        else
+            print_error "Failed to restore SSH on both ports. Manual intervention required."
+            return 1
+        fi
     fi
     print_success "SSH service restarted on port $SSH_PORT."
 
@@ -167,6 +285,11 @@ EOF
 
     print_warning "CRITICAL: Test new SSH connection in a SEPARATE terminal NOW!"
     print_warning "ACTION REQUIRED: Check your VPS provider's edge/network firewall to allow $SSH_PORT/tcp."
+
+    # Check UFW firewall status
+    print_info "Checking UFW firewall rules..."
+    ufw status numbered | grep -E "Status|${SSH_PORT}|22" || print_warning "UFW may not be active"
+
     if [[ -n "$SERVER_IP_V4" && "$SERVER_IP_V4" != "unknown" ]]; then
         print_info "Use IPv4: ssh -p $SSH_PORT $USERNAME@$SERVER_IP_V4"
     fi
@@ -194,7 +317,7 @@ EOF
             else
                 print_error "All retries failed. Initiating rollback to port $PREVIOUS_SSH_PORT..."
                 rollback_ssh_changes
-                if ! ss -tuln | grep -q ":$PREVIOUS_SSH_PORT"; then
+                if ! ss -tuln | grep -q ":$PREVIOUS_SSH_PORT "; then
                     print_error "Rollback failed. SSH not restored on original port $PREVIOUS_SSH_PORT."
                 else
                     print_success "Rollback successful. SSH restored on original port $PREVIOUS_SSH_PORT."
@@ -269,7 +392,8 @@ rollback_ssh_changes() {
             cat > /etc/systemd/system/ssh.socket.d/override.conf << EOF
 [Socket]
 ListenStream=
-ListenStream=$PREVIOUS_SSH_PORT
+ListenStream=0.0.0.0:$PREVIOUS_SSH_PORT
+ListenStream=[::]:$PREVIOUS_SSH_PORT
 EOF
         else
             local service_for_rollback="ssh.service"
@@ -288,6 +412,17 @@ EOF
         log "Rollback failed: $SSHD_BACKUP_FILE not found."
         print_info "Action: Manually configure /etc/ssh/sshd_config to use port $PREVIOUS_SSH_PORT and verify with 'sshd -t'."
         return 0
+    fi
+
+    # Remove any firewall rules added for the new SSH port
+    if command -v ufw >/dev/null 2>&1; then
+        print_info "Removing UFW rule for port $SSH_PORT if present..."
+        ufw delete allow "$SSH_PORT"/tcp 2>/dev/null || true
+    fi
+    if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+        print_info "Removing firewalld rule for port $SSH_PORT if present..."
+        firewall-cmd --permanent --remove-port=${SSH_PORT}/tcp 2>/dev/null || true
+        firewall-cmd --reload 2>/dev/null || true
     fi
 
     # Validate restored sshd_config
