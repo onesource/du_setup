@@ -28,7 +28,10 @@ fi
 
 # --- Logging Functions ---
 log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
+    # Only log if LOG_FILE is set and writable
+    if [[ -n "$LOG_FILE" ]] && [[ -w "$(dirname "$LOG_FILE")" || -w "$LOG_FILE" ]]; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE" 2>/dev/null || true
+    fi
 }
 
 print_header() {
@@ -37,35 +40,68 @@ print_header() {
     printf '%s\n' "${CYAN}╔═════════════════════════════════════════════════════════════════╗${NC}"
     printf '%s\n' "${CYAN}║                                                                 ║${NC}"
     printf '%s\n' "${CYAN}║       DEBIAN/UBUNTU SERVER SETUP AND HARDENING SCRIPT           ║${NC}"
-    printf '%s\n' "${CYAN}║                 v0.74.2_modular | 2025-11-08                    ║${NC}"
+    printf '%s\n' "${CYAN}║                 v0.74.2_modular | 2026-01-10                    ║${NC}"
     printf '%s\n' "${CYAN}║                                                                 ║${NC}"
     printf '%s\n' "${CYAN}╚═════════════════════════════════════════════════════════════════╝${NC}"
     printf '\n'
+    # Log to file if available
+    if [[ -n "$LOG_FILE" ]] && [[ -w "$(dirname "$LOG_FILE")" || -w "$LOG_FILE" ]]; then
+        {
+            printf '\n'
+            printf '╔═════════════════════════════════════════════════════════════════╗\n'
+            printf '║                                                                 ║\n'
+            printf '║       DEBIAN/UBUNTU SERVER SETUP AND HARDENING SCRIPT           ║\n'
+            printf '║                 v0.74.2_modular | 2026-01-10                    ║\n'
+            printf '║                                                                 ║\n'
+            printf '╚═════════════════════════════════════════════════════════════════╝\n'
+            printf '\n'
+        } >> "$LOG_FILE" 2>/dev/null || true
+    fi
 }
 
 print_section() {
     [[ $VERBOSE == false ]] && return
-    printf '\n%s\n' "${BLUE}▓▓▓ $1 ▓▓▓${NC}" | tee -a "$LOG_FILE"
+    printf '\n%s\n' "${BLUE}▓▓▓ $1 ▓▓▓${NC}"
     printf '%s\n' "${BLUE}$(printf '═%.0s' {1..65})${NC}"
+    # Log to file if available
+    if [[ -n "$LOG_FILE" ]] && [[ -w "$(dirname "$LOG_FILE")" || -w "$LOG_FILE" ]]; then
+        printf '\n▓▓▓ %s ▓▓▓\n' "$1" >> "$LOG_FILE" 2>/dev/null || true
+    fi
 }
 
 print_success() {
     [[ $VERBOSE == false ]] && return
-    printf '%s\n' "${GREEN}✓ $1${NC}" | tee -a "$LOG_FILE"
+    printf '%s\n' "${GREEN}✓ $1${NC}"
+    # Log to file if available
+    if [[ -n "$LOG_FILE" ]] && [[ -w "$(dirname "$LOG_FILE")" || -w "$LOG_FILE" ]]; then
+        printf '✓ %s\n' "$1" >> "$LOG_FILE" 2>/dev/null || true
+    fi
 }
 
 print_error() {
-    printf '%s\n' "${RED}✗ $1${NC}" | tee -a "$LOG_FILE"
+    printf '%s\n' "${RED}✗ $1${NC}"
+    # Log to file if available
+    if [[ -n "$LOG_FILE" ]] && [[ -w "$(dirname "$LOG_FILE")" || -w "$LOG_FILE" ]]; then
+        printf '✗ %s\n' "$1" >> "$LOG_FILE" 2>/dev/null || true
+    fi
 }
 
 print_warning() {
     [[ $VERBOSE == false ]] && return
-    printf '%s\n' "${YELLOW}⚠ $1${NC}" | tee -a "$LOG_FILE"
+    printf '%s\n' "${YELLOW}⚠ $1${NC}"
+    # Log to file if available
+    if [[ -n "$LOG_FILE" ]] && [[ -w "$(dirname "$LOG_FILE")" || -w "$LOG_FILE" ]]; then
+        printf '⚠ %s\n' "$1" >> "$LOG_FILE" 2>/dev/null || true
+    fi
 }
 
 print_info() {
     [[ $VERBOSE == false ]] && return
-    printf '%s\n' "${PURPLE}ℹ $1${NC}" | tee -a "$LOG_FILE"
+    printf '%s\n' "${PURPLE}ℹ $1${NC}"
+    # Log to file if available
+    if [[ -n "$LOG_FILE" ]] && [[ -w "$(dirname "$LOG_FILE")" || -w "$LOG_FILE" ]]; then
+        printf 'ℹ %s\n' "$1" >> "$LOG_FILE" 2>/dev/null || true
+    fi
 }
 
 print_separator() {
@@ -76,6 +112,12 @@ print_separator() {
     printf '%s\n' "${color}${header_text}${NC}"
     printf "${separator_char}%.0s" $(seq 1 ${#header_text})
     printf '\n'
+    # Log to file if available
+    if [[ -n "$LOG_FILE" ]] && [[ -w "$(dirname "$LOG_FILE")" || -w "$LOG_FILE" ]]; then
+        printf '%s\n' "$header_text" >> "$LOG_FILE" 2>/dev/null || true
+        printf "${separator_char}%.0s" $(seq 1 ${#header_text}) >> "$LOG_FILE" 2>/dev/null || true
+        printf '\n' >> "$LOG_FILE" 2>/dev/null || true
+    fi
 }
 
 # --- Validation Functions ---
@@ -168,11 +210,28 @@ execute_check() {
     "$@"
 }
 
+# Check if a package is installed
+is_installed() {
+    # Usage: is_installed package-name && ...
+    dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "installed"
+}
+
+# Ensure a directory exists and has proper ownership/permissions
+ensure_dir_owned() {
+    local dir="$1"
+    mkdir -p "$dir"
+    chmod 750 "$dir"
+}
+
 execute_command() {
     local cmd_string="$*"
 
     if [[ "$CLEANUP_PREVIEW" == "true" ]]; then
-        printf '%s Would execute: %s\n' "${CYAN}[PREVIEW]${NC}" "${BOLD}$cmd_string${NC}" | tee -a "$LOG_FILE"
+        printf '%s Would execute: %s\n' "${CYAN}[PREVIEW]${NC}" "${BOLD}$cmd_string${NC}"
+        # Log to file if available
+        if [[ -n "$LOG_FILE" ]] && [[ -w "$(dirname "$LOG_FILE")" || -w "$LOG_FILE" ]]; then
+            printf '[PREVIEW] Would execute: %s\n' "$cmd_string" >> "$LOG_FILE" 2>/dev/null || true
+        fi
         return 0
     else
         "$@"
