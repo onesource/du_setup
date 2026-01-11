@@ -183,7 +183,7 @@ EOF
     fi
 
         # Preliminary SSH service check
-        if ! dpkg -l openssh-server | grep -q ^ii; then
+        if ! dpkg -l openssh-server | grep -q "^ii"; then
             print_warning "openssh-server not installed. It will be installed in the next step."
         else
             if systemctl is-enabled ssh.service >/dev/null 2>&1 || systemctl is-active ssh.service >/dev/null 2>&1; then
@@ -354,7 +354,15 @@ EOF
         [[ -z "$PRETTY_NAME" ]] && PRETTY_NAME="$SERVER_NAME"
         # Try to detect current SSH port with error handling
         if command -v ss >/dev/null 2>&1; then
-            PREVIOUS_SSH_PORT=$(ss -tlpn 2>/dev/null | grep sshd | grep -oP ':\K\d+' | head -n 1 || echo "")
+            PREVIOUS_SSH_PORT=$(ss -tlpn 2>/dev/null | grep sshd | head -n 1 | grep -o ':[0-9]*' | sed 's/://' | head -n 1 || echo "")
+            # Fallback if necessary (rare cases)
+            if [[ -z "$PREVIOUS_SSH_PORT" ]] && [ -f /etc/ssh/sshd_config ]; then
+                PREVIOUS_SSH_PORT=$(grep -E "^Port\s+[0-9]+" /etc/ssh/sshd_config | grep -oP "\d+" | head -n 1 || echo "")
+            fi
+            # Additional fallback for Ubuntu 24.04+ with socket activation
+            if [[ -z "$PREVIOUS_SSH_PORT" ]] && [ -f /etc/systemd/system/ssh.socket.d/port.conf ]; then
+                PREVIOUS_SSH_PORT=$(grep "ListenStream=" /etc/systemd/system/ssh.socket.d/port.conf | tail -n 1 | grep -o '[0-9]*' || echo "")
+            fi
         else
             PREVIOUS_SSH_PORT=""
         fi
@@ -408,6 +416,11 @@ EOF
             print_error "Failed to update or upgrade system packages."
             exit 1
         fi
+
+        # Create chrony log directory before installation to prevent dpkg-statoverride warning
+        print_info "Pre-creating chrony log directory..."
+        mkdir -p /var/log/chrony 2>/dev/null || true
+
         print_info "Installing essential packages..."
         if ! apt-get install -y -qq \
             ufw fail2ban unattended-upgrades chrony \
@@ -417,6 +430,11 @@ EOF
             print_error "Failed to install one or more essential packages."
             exit 1
         fi
+
+        # Suppress Python SyntaxWarning messages during package installation
+        print_info "Configuring Python warnings suppression..."
+        export PYTHONWARNINGS="ignore::SyntaxWarning"
+
         print_success "Essential packages installed."
         log "Package installation completed."
     }
