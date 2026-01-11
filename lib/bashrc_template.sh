@@ -11,6 +11,18 @@ case $- in
 esac
 
 # --- History Control ---
+# Ignore commands with common secret patterns
+HISTIGNORE="${HISTIGNORE:+${HISTIGNORE}:}\
+*password*:*passwd*:*pass=*:*secret=*:*token=*\
+*apikey=*:*api_key=*:*auth=*\
+*AWS_SECRET_ACCESS_KEY=*:*AWS_ACCESS_KEY_ID=*:*AWS_SESSION_TOKEN=*\
+*GOOGLE_API_KEY=*:*GOOGLE_CREDENTIALS=*:*GCP_TOKEN=*:*OAUTH_CLIENT_SECRET=*\
+*AZURE_CLIENT_SECRET=*:*AZURE_TENANT_ID=*\
+*PRIVATE_KEY=*:*SSH_PRIVATE_KEY=*:*OPENSSH_PRIVATE_KEY=*\
+*DATABASE_URL=*:*DB_PASSWORD=*:*PGPASSWORD=*:*MYSQL_PASSWORD=*:*POSTGRES_PASSWORD=*\
+*DOCKER_HUB_TOKEN=*:*HEROKU_API_KEY=*:*KUBERNETES_TOKEN=*:*GITHUB_TOKEN=*\
+*.pem*:*id_rsa*:*id_ecdsa*:*id_ed25519*:*config*:*.key*:*.crt*\
+*curl*-[Hh]*authorization*:*wget*-[Hh]*authorization*:*--header*Authorization*"
 # Don't put duplicate lines or lines starting with space in the history.
 HISTCONTROL=ignoreboth:erasedups
 # Append to the history file, don't overwrite it.
@@ -23,7 +35,7 @@ shopt -s histverify
 # Add timestamp to history entries for audit trail (ISO 8601 format).
 HISTTIMEFORMAT="%Y-%m-%d %H:%M:%S  "
 # Ignore common commands from history to reduce clutter.
-HISTIGNORE="ls:ll:la:l:cd:pwd:exit:clear:c:history:h"
+HISTIGNORE="ls:ll:la:l:pwd:exit:clear:c:history:h"
 
 # --- General Shell Behavior & Options ---
 # Check the window size after each command and update LINES and COLUMNS.
@@ -147,7 +159,9 @@ __bash_prompt_command() {
 }
 
 # --- Activate dynamic prompt ---
-PROMPT_COMMAND=__bash_prompt_command
+if [[ $PROMPT_COMMAND != "__bash_prompt_command" ]]; then
+    PROMPT_COMMAND="__bash_prompt_command"
+fi
 
 # --- Editor Configuration ---
 # Set default editor with fallback chain.
@@ -297,7 +311,10 @@ sysinfo() {
     fi
 
     # --- Header ---
-    printf "\n%s=== System Information ===%s\n" "${BOLD_WHITE}" "${RESET}"
+    printf "\n%s\n" "-----------------------------------------------------"
+    printf "${BOLD_WHITE}%13s%s${RESET}\n" "" "=== System Information ==="
+    printf "%s\n" "-----------------------------------------------------"
+
 
     # --- CPU Info ---
     local cpu_info
@@ -325,12 +342,13 @@ sysinfo() {
     printf "${CYAN}%-15s ${RESET} %s\n" "CPU:" "$cpu_info"
 
     # --- FIX 1: Corrected Memory line ---
-    printf "${CYAN}%-15s${RESET}Memory: %s\n" "$(free -m | awk '/Mem/ {
-        used = $3; total = $2; percent = int((used/total)*100);
+    mem_usage=$(free -m | awk '/Mem/ {
+        used=$3; total=$2; percent=int((used/total)*100);
         if (used >= 1024) { used_fmt = sprintf("%.1fGi", used/1024); } else { used_fmt = sprintf("%dMi", used); }
         if (total >= 1024) { total_fmt = sprintf("%.1fGi", total/1024); } else { total_fmt = sprintf("%dMi", total); }
-        printf "%s / %s (%d%% used)\n", used_fmt, total_fmt, percent;
-    }')"
+        printf "%s / %s (%d%% used)", used_fmt, total_fmt, percent
+    }')
+    printf "${CYAN}%-15s${RESET} %s\n" "Memory:" "$mem_usage"
 
     printf "${CYAN}%-15s ${RESET} %s\n" "Disk (/):" "$(df -h / | awk 'NR==2 {print $3 " / " $4 " (" $5 " used)"}')"
 
