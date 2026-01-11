@@ -1,165 +1,226 @@
 #!/bin/bash
-
-# ============================================================================
+# ====================================================================
 # du_setup_modular.sh - Intrusion Detection System Module
-# Handles OSSEC HIDS, rootkit detection, and advanced monitoring
-# ============================================================================
+# - Wazuh manager (single-host)
+# - Active response (IPv4 + IPv6)
+# - Auditd (trimmed)
+# - AIDE, rkhunter, chkrootkit
+# - Anomaly detector, log analysis
+# ====================================================================
 
-# Source dependencies
+set -euo pipefail
+IFS=$'\n\t'
+
+# -----------------------
+# Module / environment
+# -----------------------
+# Source helper functions (adjust path as needed)
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/config.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/utils.sh"
 
-# --- OSSEC Installation and Configuration ---
-configure_ossec() {
-    print_section "OSSEC HIDS Configuration"
+# Trap only on errors (not normal exit)
+trap 'print_error "Intrusion detection module failed on line $LINENO."; log "IDS module error on line $LINENO";' ERR
+trap 'log "Intrusion detection module completed."' EXIT
 
-    if ! confirm "Install OSSEC Host-based Intrusion Detection System?"; then
-        print_info "Skipping OSSEC installation."
+# -----------------------
+# Helpers
+# -----------------------
+
+# Send HUP to Wazuh daemons that support reload (safe)
+wazuh_reload_hup() {
+    # target common Wazuh daemon names
+    for p in ossec-logcollector ossec-analysisd wazuh-modulesd; do
+        pkill -HUP -f "$p" >/dev/null 2>&1 || true
+    done
+}
+
+# Append a localfile entry to Wazuh custom include (robust)
+add_localfile() {
+    local entry="$1"
+    local tmp_file="${2:-${LOCALFILE_INCLUDE}.new}"
+
+    # Ensure temp file exists
+    touch "$tmp_file"
+
+    # Avoid duplicate entries in both the existing include and the new temp file
+    if ! grep -Fxq "$entry" "$tmp_file" 2>/dev/null && ! grep -Fxq "$entry" "${LOCALFILE_INCLUDE}" 2>/dev/null; then
+        echo "$entry" >> "$tmp_file"
+    fi
+}
+
+# -----------------------
+# Ensure mailutils for cron mails (non-interactive)
+# -----------------------
+install_mailutils_noninteractive() {
+    # NOTE: Installing mailutils will pull in a MTA (postfix/exim). This script installs mailutils only.
+    # For SES, configure postfix or an SMTP relay afterwards (SES credentials/relayhost) - outside this script.
+    if ! is_installed mailutils; then
+        print_info "Installing mailutils (non-interactive). Configure your MTA for SES after install."
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mailutils || true
+    else
+        print_info "mailutils already installed."
+    fi
+}
+
+# -----------------------
+# Wazuh Manager
+# -----------------------
+configure_wazuh() {
+    print_section "Wazuh HIDS (manager-only) Configuration"
+
+    if ! confirm "Install Wazuh Manager on this server (manager-only)?"; then
+        print_info "Skipping Wazuh installation."
         return 0
     fi
 
-    # Check if OSSEC is already installed
-    if command -v ossec-control >/dev/null 2>&1; then
-        print_info "OSSEC is already installed."
-        if confirm "Reconfigure OSSEC?"; then
-            print_info "Backing up existing OSSEC configuration..."
-            cp -r /var/ossec/etc "$BACKUP_DIR/ossec_etc_backup_$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
-        else
+    # Idempotency: if manager is installed, optionally reconfigure
+    if is_installed wazuh-manager; then
+        print_info "Wazuh manager appears installed."
+        if ! confirm "Reconfigure Wazuh manager?"; then
+            print_info "Skipping reconfiguration."
             return 0
         fi
+        mkdir -p "${BACKUP_DIR:-/var/backups}"
+        cp -a "${WAZUH_CONF}" "${BACKUP_DIR:-/var/backups}/wazuh_ossec.conf.bak_$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
     fi
 
-    # Install OSSEC dependencies
-    print_info "Installing OSSEC dependencies..."
-    apt-get install -y -qq build-essential inotify-tools libssl-dev python3-dev
+    # Ensure apt deps for repo
+    print_info "Ensuring APT transport and GPG tools..."
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl gnupg apt-transport-https lsb-release
 
-    # Download and compile OSSEC
-    local OSSEC_VERSION="3.7.0"
-    local OSSEC_TAR="ossec-hids-${OSSEC_VERSION}.tar.gz"
-    local OSSEC_URL="https://github.com/ossec/ossec-hids/archive/${OSSEC_VERSION}.tar.gz"
-    local OSSEC_DIR="/tmp/ossec-hids-${OSSEC_VERSION}"
-
-    print_info "Downloading OSSEC ${OSSEC_VERSION}..."
-    if ! curl -sL "$OSSEC_URL" -o "/tmp/$OSSEC_TAR"; then
-        print_error "Failed to download OSSEC."
-        return 1
+    # Add Wazuh APT repo & key (idempotent)
+    if [ ! -f /usr/share/keyrings/wazuh.gpg ] || [ ! -f /etc/apt/sources.list.d/wazuh.list ]; then
+        print_info "Installing Wazuh repository key and apt source..."
+        # Use gpg --dearmor to create a proper keyring for apt (more portable)
+        curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --dearmor >/usr/share/keyrings/wazuh.gpg 2>/dev/null || true
+        chmod 644 /usr/share/keyrings/wazuh.gpg || true
+        echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" \
+            > /etc/apt/sources.list.d/wazuh.list
+        DEBIAN_FRONTEND=noninteractive apt-get update -qq
     fi
 
-    print_info "Extracting OSSEC..."
-    cd /tmp
-    tar -xzf "$OSSEC_TAR" || {
-        print_error "Failed to extract OSSEC archive."
-        rm -f "/tmp/$OSSEC_TAR"
-        return 1
-    }
-
-    # Pre-generate OSSEC answers for automated installation
-    print_info "Configuring OSSEC for automated installation..."
-    cat > /tmp/preseed.txt <<'EOF'
-en
-server
-local
-/var/ossec
-no
-yes
-no
-no
-no
-yes
-no
-no
-no
-EOF
-
-    print_info "Installing OSSEC (this may take several minutes)..."
-    cd "$OSSEC_DIR"
-    if ! bash ./install.sh < /tmp/preseed.txt > /tmp/ossec_install.log 2>&1; then
-        print_error "OSSEC installation failed. Check /tmp/ossec_install.log for details."
-        cd /
-        rm -rf "$OSSEC_DIR" "/tmp/$OSSEC_TAR" /tmp/preseed.txt
-        return 1
+    # Install manager (manager-only; do not install agent)
+    if ! is_installed wazuh-manager; then
+        print_info "Installing wazuh-manager..."
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq wazuh-manager
+        systemctl daemon-reload
+        systemctl enable --now wazuh-manager
+        # Ensure it is running
+        if ! systemctl is-active --quiet wazuh-manager; then
+            systemctl start wazuh-manager
+        fi
+    else
+        print_info "wazuh-manager already installed."
     fi
 
-    # Configure OSSEC
-    print_info "Configuring OSSEC rules..."
+    # Create include directories (keeps custom config isolated from upstream)
+    ensure_dir_owned "${LOCAL_INCLUDE_DIR}"
+    ensure_dir_owned "${RULES_INCLUDE_DIR}"
 
-    # Create OSSEC configuration
-    tee /var/ossec/etc/ossec.conf > /dev/null <<'EOF'
-<ossec_config>
-  <global>
-    <email_notification>no</email_notification>
-    <jsonout_output>yes</jsonout_output>
-  </global>
+    # --- Create or update localfile include (only add entries for logs that exist) ---
+    print_info "Writing Wazuh localfile include (idempotent)..."
+    mkdir -p "$(dirname "${LOCALFILE_INCLUDE}")"
+    LOCALFILE_TMP=$(mktemp)
+    # Build content conditionally into temp file
+    {
+        echo '<localfile>'
+        echo '  <log_format>syslog</log_format>'
+        echo '  <location>/var/log/auth.log</location>'
+        echo '</localfile>'
+        # include rotated auth if present (some systems have .1)
+        if [ -f /var/log/auth.log.1 ]; then
+            echo '<localfile>'
+            echo '  <log_format>syslog</log_format>'
+            echo '  <location>/var/log/auth.log.1</location>'
+            echo '</localfile>'
+        fi
+        # auditd log
+        if [ -f /var/log/audit/audit.log ]; then
+            echo '<localfile>'
+            echo '  <log_format>audit</log_format>'
+            echo '  <location>/var/log/audit/audit.log</location>'
+            echo '</localfile>'
+        fi
+        # syslog
+        if [ -f /var/log/syslog ]; then
+            echo '<localfile>'
+            echo '  <log_format>syslog</log_format>'
+            echo '  <location>/var/log/syslog</location>'
+            echo '</localfile>'
+        fi
+        # apache (only if dir or access.log exist)
+        if [ -d /var/log/apache2 ] || [ -f /var/log/apache2/access.log ]; then
+            echo '<localfile>'
+            echo '  <log_format>apache</log_format>'
+            echo '  <location>/var/log/apache2/access.log</location>'
+            echo '</localfile>'
+            echo '<localfile>'
+            echo '  <log_format>apache</log_format>'
+            echo '  <location>/var/log/apache2/error.log</location>'
+            echo '</localfile>'
+        fi
+        # nginx
+        if [ -d /var/log/nginx ] || [ -f /var/log/nginx/access.log ]; then
+            echo '<localfile>'
+            echo '  <log_format>nginx</log_format>'
+            echo '  <location>/var/log/nginx/access.log</location>'
+            echo '</localfile>'
+            echo '<localfile>'
+            echo '  <log_format>nginx</log_format>'
+            echo '  <location>/var/log/nginx/error.log</location>'
+            echo '</localfile>'
+        fi
+    } > "${LOCALFILE_TMP}"
 
-  <rules>
-    <include>rules_config.xml</include>
-    <include>sshd_rules.xml</include>
-    <include>syslog_rules.xml</include>
-    <include>web_rules.xml</include>
-    <include>apache_rules.xml</include>
-    <include>nginx_rules.xml</include>
-    <include>local_rules.xml</include>
-  </rules>
+    # Append Docker container log files (if docker present) to the new include in a safe way
+    if command -v docker >/dev/null 2>&1; then
+        docker ps --format '{{.ID}} {{.Names}}' | grep -E 'nginx|apache|httpd' | while read -r id _name; do
+            LOG="/var/lib/docker/containers/${id}/${id}-json.log"
+            if [ -f "$LOG" ]; then
+                entry=$(cat <<-XML
+<localfile>
+  <log_format>json</log_format>
+  <location>${LOG}</location>
+</localfile>
+XML
+)
+                add_localfile "$entry" "${LOCALFILE_TMP}"
+            fi
+        done
+    fi
 
-  <syscheck>
-    <frequency>7200</frequency>
-    <scan_on_start>yes</scan_on_start>
+    # Replace only when content differs
+    if [ ! -f "${LOCALFILE_INCLUDE}" ] || ! cmp -s "${LOCALFILE_TMP}" "${LOCALFILE_INCLUDE}"; then
+        mv "${LOCALFILE_TMP}" "${LOCALFILE_INCLUDE}"
+        chown root:ossec "${LOCALFILE_INCLUDE}" || true
+        chmod 640 "${LOCALFILE_INCLUDE}"
+        print_info "Updated ${LOCALFILE_INCLUDE}"
+    else
+        rm -f "${LOCALFILE_TMP}"
+        print_info "No change to ${LOCALFILE_INCLUDE}"
+    fi
 
-    <!-- Directories to monitor -->
-    <directories check_all="yes" realtime="yes">/etc,/usr/bin,/usr/sbin</directories>
-    <directories check_all="yes" realtime="yes">/bin,/sbin,/boot</directories>
-    <directories check_all="yes">/root,/home</directories>
-
-    <!-- Files to ignore -->
-    <ignore>/etc/mtab</ignore>
-    <ignore>/etc/hosts.deny</ignore>
-    <ignore>/etc/mail/statistics</ignore>
-    <ignore>/etc/random-seed</ignore>
-    <ignore>/etc/adjtime</ignore>
-    <ignore>/etc/httpd/logs</ignore>
-    <ignore>/etc/utmpx</ignore>
-    <ignore>/etc/wtmpx</ignore>
-    <ignore>/etc/cups/certs</ignore>
-    <ignore>/etc/dumpdates</ignore>
-    <ignore>/etc/svc/volatile</ignore>
-    <ignore>/sys/kernel/security</ignore>
-    <ignore>/var/run/fail2ban/fail2ban.sock</ignore>
-  </syscheck>
+    # --- Syscheck include (realtime selective) ---
+    print_info "Writing Wazuh syscheck include (idempotent)..."
+    mkdir -p "$(dirname "${SYSCHECK_INCLUDE}")"
+    SYSCHECK_TMP=$(mktemp)
+    cat > "${SYSCHECK_TMP}" <<'EOF'
+<syscheck>
+  <frequency>7200</frequency>
+  <scan_on_start>yes</scan_on_start>
+  <!-- Monitor key paths, avoid noisy coverage like entire /usr during upgrades -->
+  <directories check_all="yes" realtime="yes">/etc,/usr/bin,/usr/sbin</directories>
+  <directories check_all="yes" realtime="no">/bin,/sbin,/boot</directories>
+  <directories check_all="yes">/root,/home</directories>
+  <ignore>/etc/mtab</ignore>
+  <ignore>/var/run/fail2ban/fail2ban.sock</ignore>
+</syscheck>
 
   <rootcheck>
     <rootkit_files>/var/ossec/etc/shared/rootkit_files.txt</rootkit_files>
     <rootkit_trojans>/var/ossec/etc/shared/rootkit_trojans.txt</rootkit_trojans>
   </rootcheck>
-
-  <localfile>
-    <log_format>syslog</log_format>
-    <location>/var/log/auth.log</location>
-  </localfile>
-
-  <localfile>
-    <log_format>syslog</log_format>
-    <location>/var/log/syslog</location>
-  </localfile>
-
-  <localfile>
-    <log_format>apache</log_format>
-    <location>/var/log/apache2/access.log</location>
-  </localfile>
-
-  <localfile>
-    <log_format>apache</log_format>
-    <location>/var/log/apache2/error.log</location>
-  </localfile>
-
-  <localfile>
-    <log_format>nginx</log_format>
-    <location>/var/log/nginx/access.log</location>
-  </localfile>
-
-  <localfile>
-    <log_format>nginx</log_format>
-    <location>/var/log/nginx/error.log</location>
-  </localfile>
 
   <alerts>
     <log_alert_level>1</log_alert_level>
@@ -173,29 +234,39 @@ EOF
     <timeout_allowed>yes</timeout_allowed>
   </command>
 
-  <active-responses>
+  <active-response>
     <command>firewall-drop</command>
     <location>local</location>
     <level>6</level>
     <timeout>300</timeout>
-  </active-responses>
-</ossec_config>
+  </active-response>
 EOF
 
-    # Create custom local rules for enhanced detection
-    tee /var/ossec/rules/local_rules.xml > /dev/null <<'EOF'
-<group name="local,syslog,">
-  <!-- Custom rules for enhanced security monitoring -->
+    if [ ! -f "${SYSCHECK_INCLUDE}" ] || ! cmp -s "${SYSCHECK_TMP}" "${SYSCHECK_INCLUDE}"; then
+        mv "${SYSCHECK_TMP}" "${SYSCHECK_INCLUDE}"
+        chown root:ossec "${SYSCHECK_INCLUDE}" || true
+        chmod 640 "${SYSCHECK_INCLUDE}"
+        print_info "Updated ${SYSCHECK_INCLUDE}"
+    else
+        rm -f "${SYSCHECK_TMP}"
+        print_info "No change to ${SYSCHECK_INCLUDE}"
+    fi
 
-  <!-- Detect multiple SSH failed attempts from same IP -->
+    # --- Local rules include (idempotent) ---
+    print_info "Writing Wazuh local rules include (idempotent)..."
+    mkdir -p "$(dirname "${LOCAL_RULES_FILE}")"
+    LOCAL_RULES_TMP=$(mktemp)
+    cat > "${LOCAL_RULES_TMP}" <<'EOF'
+<group name="local,syslog,">
+  <!-- Detect multiple SSH failed attempts -->
   <rule id="100001" level="10" frequency="6" timeframe="120">
-    <if_sid>5710</if_sid>
+    <if_sid>5710,5716</if_sid>
     <same_source_ip />
     <description>Multiple SSH failed attempts from same source IP.</description>
     <group>authentication_failures,ssh</group>
   </rule>
 
-  <!-- Detect sudo usage by non-authorized users -->
+  <!-- Detect sudo usage -->
   <rule id="100002" level="8">
     <if_sid>5400</if_sid>
     <match>sudo:</match>
@@ -206,13 +277,13 @@ EOF
 
   <!-- Detect new user creation -->
   <rule id="100003" level="7">
-    <if_sid>5500</if_sid>
+    <if_sid>5902</if_sid>
     <match>useradd</match>
     <description>New user account created.</description>
     <group>adduser,account_change</group>
   </rule>
 
-  <!-- Detect suspicious cron job modifications -->
+  <!-- Detect cron modifications -->
   <rule id="100004" level="8">
     <if_sid>5400</if_sid>
     <match>crontab</match>
@@ -221,11 +292,11 @@ EOF
     <group>config_change,cron</group>
   </rule>
 
-  <!-- Detect package installations -->
+  <!-- Detect package installs -->
   <rule id="100005" level="7">
     <if_sid>5400</if_sid>
     <match>dpkg|apt-get|apt</match>
-    <regex>install|install</regex>
+    <regex>install</regex>
     <description>Package installation detected.</description>
     <group>package_install,software_mgmt</group>
   </rule>
@@ -239,7 +310,7 @@ EOF
     <group>network_change</group>
   </rule>
 
-  <!-- Detect file integrity violations -->
+  <!-- Detect file integrity changes -->
   <rule id="100007" level="12">
     <if_sid>550</if_sid>
     <description>Integrity checksum changed.</description>
@@ -248,82 +319,205 @@ EOF
 </group>
 EOF
 
-    # Enable and start OSSEC
-    print_info "Enabling OSSEC services..."
-    /var/ossec/bin/ossec-control enable
-    /var/ossec/bin/ossec-control start
-
-    # Verify OSSEC is running
-    if /var/ossec/bin/ossec-control status | grep -q "is running"; then
-        print_success "OSSEC HIDS is installed and running."
-
-        # Add OSSEC to startup
-        tee /etc/systemd/system/ossec.service > /dev/null <<'EOF'
-[Unit]
-Description=OSSEC HIDS
-After=network.target
-
-[Service]
-Type=forking
-ExecStart=/var/ossec/bin/ossec-control start
-ExecStop=/var/ossec/bin/ossec-control stop
-ExecReload=/var/ossec/bin/ossec-control restart
-PIDFile=/var/ossec/var/ossec.pid
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-        systemctl enable ossec.service
-        systemctl daemon-reload
-
-        # Create initial baseline
-        print_info "Creating initial file integrity baseline..."
-        /var/ossec/bin/syscheckd -f
-
-        log "OSSEC HIDS installation completed."
+    if [ ! -f "${LOCAL_RULES_FILE}" ] || ! cmp -s "${LOCAL_RULES_TMP}" "${LOCAL_RULES_FILE}"; then
+        mv "${LOCAL_RULES_TMP}" "${LOCAL_RULES_FILE}"
+        chown root:ossec "${LOCAL_RULES_FILE}" || true
+        chmod 640 "${LOCAL_RULES_FILE}"
+        print_info "Updated ${LOCAL_RULES_FILE}"
     else
-        print_error "OSSEC failed to start properly."
-        return 1
+        rm -f "${LOCAL_RULES_TMP}"
+        print_info "No change to ${LOCAL_RULES_FILE}"
     fi
 
-    # Cleanup
-    cd /
-    rm -rf "$OSSEC_DIR" "/tmp/$OSSEC_TAR" /tmp/preseed.txt
+    # --- Ensure ossec.conf includes our files (idempotent) ---
+    print_info "Ensuring ossec.conf references our include files..."
+    # Add include lines before closing tag if missing
+    grep -q '<include file="local/localfile_custom.conf"' "${WAZUH_CONF}" 2>/dev/null || \
+        sed -i '/<\/ossec_config>/i \  <include file="local/localfile_custom.conf" />' "${WAZUH_CONF}"
+
+    grep -q '<include file="local/syscheck_custom.conf"' "${WAZUH_CONF}" 2>/dev/null || \
+        sed -i '/<\/ossec_config>/i \  <include file="local/syscheck_custom.conf" />' "${WAZUH_CONF}"
+
+    grep -q '<include>rules/local_rules_custom.xml' "${WAZUH_CONF}" 2>/dev/null || \
+        sed -i '/<\/ossec_config>/i \  <include>rules/local_rules_custom.xml</include>' "${WAZUH_CONF}"
+
+    # Signal Wazuh daemons to reload config (SIGHUP; safe)
+    wazuh_reload_hup
+
+    # -------------------------------
+    # Active-response: firewall-drop (IPv4 + IPv6 equal priority)
+    # -------------------------------
+    if [ ! -f "${ACTIVE_RESPONSE_SCRIPT}" ]; then
+        print_info "Installing active-response firewall script (IPv4 + IPv6)..."
+        mkdir -p "${ACTIVE_RESPONSE_DIR}"
+        cat > "${ACTIVE_RESPONSE_SCRIPT}" <<'EOF'
+#!/bin/bash
+ACTION="$1"
+IP="$3"
+
+# Require nftables; if missing, log and exit (do not fail Wazuh action)
+if ! command -v nft >/dev/null 2>&1; then
+    logger -t wazuh "nft command not found; active-response no-op for $IP"
+    exit 0
+fi
+
+# Setup nftables v4 and v6 if missing (idempotent)
+nft list table ip ossec_filter >/dev/null 2>&1 || nft add table ip ossec_filter
+nft list chain ip ossec_filter input >/dev/null 2>&1 || nft add chain ip ossec_filter input '{ type filter hook input priority 0; policy accept; }'
+nft list set ip ossec_filter blocked_ips >/dev/null 2>&1 || nft add set ip ossec_filter blocked_ips '{ type ipv4_addr; }'
+if ! nft list chain ip ossec_filter input 2>/dev/null | grep -q 'ip saddr @blocked_ips drop'; then
+    nft add rule ip ossec_filter input ip saddr @blocked_ips drop 2>/dev/null || true
+fi
+
+nft list table ip6 ossec_filter >/dev/null 2>&1 || nft add table ip6 ossec_filter
+nft list chain ip6 ossec_filter input >/dev/null 2>&1 || nft add chain ip6 ossec_filter input '{ type filter hook input priority 0; policy accept; }'
+nft list set ip6 ossec_filter blocked_ips6 >/dev/null 2>&1 || nft add set ip6 ossec_filter blocked_ips6 '{ type ipv6_addr; }'
+if ! nft list chain ip6 ossec_filter input 2>/dev/null | grep -q 'ip6 saddr @blocked_ips6 drop'; then
+    nft add rule ip6 ossec_filter input ip6 saddr @blocked_ips6 drop 2>/dev/null || true
+fi
+
+# Add/delete element depending on IP family
+if [[ "$IP" == *:* ]]; then
+    # IPv6
+    if [ "$ACTION" = "add" ]; then
+        nft add element ip6 ossec_filter blocked_ips6 { "$IP" } 2>/dev/null || true
+        logger -t wazuh "Blocked IPv6: $IP"
+    elif [ "$ACTION" = "delete" ]; then
+        nft delete element ip6 ossec_filter blocked_ips6 { "$IP" } 2>/dev/null || true
+    fi
+else
+    # IPv4
+    if [ "$ACTION" = "add" ]; then
+        nft add element ip ossec_filter blocked_ips { "$IP" } 2>/dev/null || true
+        logger -t wazuh "Blocked IPv4: $IP"
+    elif [ "$ACTION" = "delete" ]; then
+        nft delete element ip ossec_filter blocked_ips { "$IP" } 2>/dev/null || true
+    fi
+fi
+EOF
+        chmod 750 "${ACTIVE_RESPONSE_SCRIPT}"
+        chown root:ossec "${ACTIVE_RESPONSE_SCRIPT}" || true
+        print_info "Active-response script installed."
+    else
+        print_info "Active-response script already present."
+    fi
+
+    # Tell Wazuh to reload active-response (HUP)
+    wazuh_reload_hup
+
+    print_success "Wazuh manager configured (manager-only)."
+    log "Wazuh manager configuration completed."
 }
 
-# --- Rootkit Detection Tools ---
-configure_rootkit_detection() {
-    print_section "Rootkit Detection Configuration"
+# -----------------------
+# AIDE (FIM)
+# -----------------------
+configure_aide() {
+    print_section "AIDE (file integrity monitoring)"
 
-    if ! confirm "Install and configure rootkit detection tools (chkrootkit and rkhunter)?"; then
-        print_info "Skipping rootkit detection tools."
+    if ! confirm "Install and configure AIDE for FIM?"; then
+        print_info "Skipping AIDE."
         return 0
     fi
 
-    # Install chkrootkit
-    print_info "Installing chkrootkit..."
-    apt-get install -y -qq chkrootkit
+    # Install AIDE if missing
+    if ! is_installed aide; then
+        print_info "Installing AIDE..."
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq aide aide-common || {
+            print_error "Failed to install AIDE"
+            return 1
+        }
+    fi
 
-    # Install rkhunter
-    print_info "Installing rkhunter..."
-    apt-get install -y -qq rkhunter
+# --- Secure database directory ---
+    ensure_dir_owned /var/lib/aide
+    chown root:root /var/lib/aide
+    chmod 700 /var/lib/aide
 
-    # Configure rkhunter
-    print_info "Configuring rkhunter..."
+    # Initialize DB if missing - check for common database files
+    if [ ! -f /var/lib/aide/aide.db ] && [ ! -f /var/lib/aide/aide.db.new ]; then
+        print_info "Initializing AIDE database..."
+        # Try aideinit first, fall back to manual init
+        if command -v aideinit >/dev/null 2>&1 && aideinit --yes; then
+            print_info "AIDE database initialized via aideinit"
+        else
+            print_info "Using manual AIDE database initialization..."
+            aide -i || {
+                print_error "Manual AIDE database initialization failed"
+                return 1
+            }
+            # Move the newly created database
+            if [ -f /var/lib/aide/aide.db.new ]; then
+                mv /var/lib/aide/aide.db.new /var/lib/aide/aide.db || { print_error "Failed to move AIDE database"; return 1; }
+            fi
+        fi
+        print_warning "IMPORTANT: The AIDE database at /var/lib/aide/aide.db is a critical security asset."
+        print_warning "You should immediately back it up to secure, read-only, and offline storage."
+    else
+        print_info "AIDE database already exists."
+    fi
 
-    # Update rkhunter database
-    rkhunter --update --rwo
+    # Provide daily check script (cron.daily as a script, not a crontab entry)
+    if [ ! -f /etc/cron.daily/aide ]; then
+        print_info "Creating daily AIDE check script with email notifications..."
+        cat > /etc/cron.daily/aide <<'EOF'
+#!/bin/sh
+# Set the email address to receive alerts.
+# This should be a verified email in your AWS SES account.
+    # Allow ADMIN_EMAIL to be supplied via environment; default empty
+    ADMIN_EMAIL="${ADMIN_EMAIL:-}"
 
-    # Create rkhunter configuration
-    tee /etc/rkhunter.conf.local > /dev/null <<'EOF'
-# RKHunter local configuration for enhanced security
-# Allow script files to be writable by their owner
+    # Determine aide binary at runtime
+    AIDE_BIN="$(command -v aide || echo /usr/bin/aide)"
+    # Run AIDE check and capture all output (stdout and stderr)
+    AIDE_OUTPUT="$($AIDE_BIN --check 2>&1)"
+HOST=$(hostname)
+
+# AIDE returns >0 on changes
+if echo "$AIDE_OUTPUT" | grep -Eiq "changed|added|removed|violation|difference"; then
+    [ -n "$ADMIN_EMAIL" ] && echo "$AIDE_OUTPUT" | mail -s "AIDE Alert on $HOST" "$ADMIN_EMAIL"
+    echo "$AIDE_OUTPUT" | logger -t aide -p user.err
+else
+    echo "$AIDE_OUTPUT" | logger -t aide -p user.info
+fi
+
+exit 0
+EOF
+        chmod 700 /etc/cron.daily/aide
+    fi
+
+    print_success "AIDE configured with email notifications via Postfix/SES."
+    log "AIDE configuration completed."
+}
+
+# -----------------------
+# Rootkit detection (rkhunter / chkrootkit)
+# -----------------------
+configure_rootkit_detection() {
+    print_section "Rootkit detection"
+
+    if ! confirm "Install chkrootkit and rkhunter?"; then
+        print_info "Skipping rootkit detection."
+        return 0
+    fi
+
+    # Install packages if missing
+    local pkgs=(chkrootkit rkhunter)
+    local to_install=()
+    for p in "${pkgs[@]}"; do
+        is_installed "$p" || to_install+=("$p")
+    done
+    if (( ${#to_install[@]} )); then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${to_install[@]}"
+    fi
+
+    # rkhunter local config (append only if missing)
+    if [ ! -f /etc/rkhunter.conf.local ]; then
+        cat > /etc/rkhunter.conf.local <<'EOF'
 ALLOW_SSH_ROOT_USER=no
-ALLOW_SSH_PROT_V1=0
-ENABLE_TESTS=all
-DISABLE_TESTS=none
+ALLOW_SYSLOG_REMOTE_LOGGING=no
+# Keep most tests enabled; whitelist some noisy scripts
+# The baseline should be updated with 'rkhunter --propupd' after system updates.
 SCRIPTWHITELIST=/usr/bin/ldd
 SCRIPTWHITELIST=/usr/bin/whatis
 SCRIPTWHITELIST=/usr/bin/ldconfig
@@ -338,307 +532,348 @@ SCRIPTWHITELIST=/usr/sbin/groupmod
 SCRIPTWHITELIST=/usr/sbin/pwconv
 SCRIPTWHITELIST=/usr/sbin/grpconv
 EOF
+    fi
 
-    # Run initial rkhunter check
-    print_info "Running initial rkhunter system check..."
-    rkhunter --check --rwo --sk || true
+    # Update properties & initial check
+    rkhunter --propupd || true
+    rkhunter --update || true
+    # Run initial check
+    rkhunter --check --rwo --sk 2>&1 | logger -t rkhunter || true
 
-    # Create cron jobs for regular scanning
-    print_info "Setting up regular rootkit scans..."
-
-    # Daily chkrootkit scan
-    echo "0 2 * * * /usr/sbin/chkrootkit 2>&1 | logger -t chkrootkit" > /etc/cron.daily/chkrootkit
-    chmod +x /etc/cron.daily/chkrootkit
-
-    # Weekly rkhunter scan
-    cat > /etc/cron.weekly/rkhunter <<'EOF'
-#!/bin/bash
-# Weekly rkhunter scan with database update
-/usr/bin/rkhunter --update --rwo
-/usr/bin/rkhunter --check --rwo --sk | logger -t rkhunter
+    # chkrootkit weekly
+    if [ ! -f /etc/cron.weekly/chkrootkit ]; then
+        cat > /etc/cron.weekly/chkrootkit <<'EOF'
+#!/bin/sh
+/usr/sbin/chkrootkit 2>&1 | logger -t chkrootkit
 EOF
-    chmod +x /etc/cron.weekly/rkhunter
+        chmod +x /etc/cron.weekly/chkrootkit
+    fi
 
-    print_success "Rootkit detection tools installed and configured."
+    print_success "Rootkit detection configured."
     log "Rootkit detection configuration completed."
 }
 
-# --- Log Correlation and Analysis ---
+# -----------------------
+# Log correlation and analyzer
+# -----------------------
 configure_log_correlation() {
-    print_section "Log Correlation and Analysis"
+    print_section "Log correlation & analysis"
 
-    if ! confirm "Configure centralized log correlation and analysis?"; then
-        print_info "Skipping log correlation setup."
+    if ! confirm "Configure log rotation and security log analyzer?"; then
+        print_info "Skipping log correlation."
         return 0
     fi
 
-    # Ensure logrotate is configured for security logs
-    print_info "Configuring log rotation for security logs..."
-
-    tee /etc/logrotate.d/security-logs > /dev/null <<'EOF'
+    # Only rotate system logs (not Wazuh-managed logs)
+    if [ ! -f /etc/logrotate.d/security-logs ]; then
+        cat > /etc/logrotate.d/security-logs <<'EOF'
 /var/log/auth.log {
     daily
-    missingok
     rotate 30
     compress
     delaycompress
-    sharedscripts
+    missingok
+    notifempty
     postrotate
         systemctl reload rsyslog >/dev/null 2>&1 || true
     endscript
 }
 
-/var/log/ossec/logs/alerts.log {
+/var/log/audit/*.log {
     daily
-    missingok
     rotate 30
     compress
     delaycompress
+    missingok
+    notifempty
     sharedscripts
     postrotate
-        /var/ossec/bin/ossec-control restart >/dev/null 2>&1 || true
+        /usr/sbin/service auditd rotate >/dev/null 2>&1 || true
     endscript
 }
 EOF
-
-    # Create log analysis script
-    print_info "Creating log analysis script..."
-    tee /usr/local/bin/security-log-analyzer.sh > /dev/null <<'EOF'
-#!/bin/bash
-# Security Log Analyzer Script
-# Analyzes various security logs for suspicious activities
-
-LOG_FILE="/var/log/security-analysis.log"
-DATE=$(date '+%Y-%m-%d %H:%M:%S')
-
-# Function to log with timestamp
-log_message() {
-    echo "[$DATE] $1" >> "$LOG_FILE"
-}
-
-# Analyze SSH authentication failures
-analyze_ssh_failures() {
-    local failed_count
-    failed_count=$(grep "authentication failure" /var/log/auth.log | grep "$(date '+%b %d')" | wc -l)
-    if [ "$failed_count" -gt 10 ]; then
-        log_message "WARNING: High number of SSH failures detected: $failed_count"
+        chmod 644 /etc/logrotate.d/security-logs
     fi
-}
 
-# Analyze sudo usage
-analyze_sudo_usage() {
-    local sudo_count
-    sudo_count=$(grep "sudo:" /var/log/auth.log | grep "$(date '+%b %d')" | wc -l)
-    if [ "$sudo_count" -gt 20 ]; then
-        log_message "INFO: High sudo usage detected: $sudo_count commands"
-    fi
+    # security-analysis log
+    cat > /etc/logrotate.d/security-analysis <<'EOF'
+/var/log/security-analysis.log {
+    daily
+    rotate 14
+    compress
+    missingok
+    notifempty
 }
-
-# Analyze OSSEC alerts
-analyze_ossec_alerts() {
-    if [ -f /var/ossec/logs/alerts/alerts.log ]; then
-        local high_alerts
-        high_alerts=$(grep "$(date '+%Y %m %d')" /var/ossec/logs/alerts/alerts.log | grep -E "level [7-9]" | wc -l)
-        if [ "$high_alerts" -gt 0 ]; then
-            log_message "ALERT: $high_alerts high-priority OSSEC alerts detected"
-        fi
-    fi
-}
-
-# Run all analyses
-analyze_ssh_failures
-analyze_sudo_usage
-analyze_ossec_alerts
 EOF
+    chmod 644 /etc/logrotate.d/security-analysis
 
+    # Analyzer script (reads Wazuh alerts file if present)
+    cat > /usr/local/bin/security-log-analyzer.sh <<'EOF'
+#!/bin/bash
+LOG_FILE="/var/log/security-analysis.log"
+log() { echo "[\$(date '+%Y-%m-%d %H:%M:%S')] \$1" >> "\$LOG_FILE"; }
+
+# SSH failed logins
+ssh_failures=\$(grep -c "Failed password" /var/log/auth.log 2>/dev/null || echo 0)
+[ "\$ssh_failures" -gt ${SSH_FAILURE_THRESHOLD} ] && log "ALERT: \$ssh_failures SSH failed login attempts"
+
+# Sudo commands
+sudo_count=\$(grep -c "sudo:.*COMMAND" /var/log/auth.log 2>/dev/null || echo 0)
+[ "\$sudo_count" -gt ${SUDO_COUNT_THRESHOLD} ] && log "INFO: \$sudo_count sudo commands executed"
+
+# Wazuh high-priority alerts (if file exists)
+if [ -f "${WAZUH_ALERTS_LOG}" ]; then
+    # Count blocks containing 'level [7-9]' roughly; keep simple and robust
+    high_alerts=\$(grep -E "level [7-9]" "${WAZUH_ALERTS_LOG}" 2>/dev/null | wc -l || echo 0)
+    [ "\$high_alerts" -gt 0 ] && log "ALERT: \$high_alerts high-priority Wazuh alerts"
+fi
+EOF
     chmod +x /usr/local/bin/security-log-analyzer.sh
+    # Restrict analyzer script ownership and permissions
+    chown root:root /usr/local/bin/security-log-analyzer.sh || true
+    chmod 750 /usr/local/bin/security-log-analyzer.sh || true
+    cp /usr/local/bin/security-log-analyzer.sh /etc/cron.hourly/security-log-analyzer 2>/dev/null || true
+    chown root:root /etc/cron.hourly/security-log-analyzer 2>/dev/null || true
+    chmod 750 /etc/cron.hourly/security-log-analyzer 2>/dev/null || true
 
-    # Add to cron for hourly analysis
-    echo "0 * * * * /usr/local/bin/security-log-analyzer.sh" > /etc/cron.hourly/security-log-analyzer
-    chmod +x /etc/cron.hourly/security-log-analyzer
-
-    print_success "Log correlation and analysis configured."
-    log "Log correlation configuration completed."
+    print_success "Log correlation configured."
+    log "Log correlation completed."
 }
 
-# --- Behavioral Anomaly Detection ---
+# -----------------------
+# Behavioral anomaly detection
+# -----------------------
 configure_anomaly_detection() {
-    print_section "Behavioral Anomaly Detection"
+    print_section "Behavioral anomaly detection"
 
-    if ! confirm "Configure basic behavioral anomaly detection?"; then
-        print_info "Skipping anomaly detection setup."
+    if ! confirm "Install basic anomaly detection (cpu/mem/connections/processes/disk)?"; then
+        print_info "Skipping anomaly detection."
         return 0
     fi
 
-    # Install monitoring dependencies
-    print_info "Installing anomaly detection dependencies..."
-    apt-get install -y -qq iotop nethogs
+    # ensure dependencies
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bc procps curl
 
-    # Create anomaly detection script
-    print_info "Creating anomaly detection script..."
-    tee /usr/local/bin/anomaly-detector.sh > /dev/null <<'EOF'
+    cat > /usr/local/bin/anomaly-detector.sh <<'EOF'
 #!/bin/bash
-# Basic Anomaly Detection Script
-# Monitors for unusual system behavior
-
 ALERT_LOG="/var/log/anomaly-detections.log"
-DATE=$(date '+%Y-%m-%d %H:%M:%S')
+send_alert(){ echo "[\$(date '+%Y-%m-%d %H:%M:%S')] ANOMALY: \$1" >> "\$ALERT_LOG"; }
 
-# Function to send alerts
-send_alert() {
-    local message="$1"
-    echo "[$DATE] ANOMALY: $message" >> "$ALERT_LOG"
+cpu=\$(top -bn1 | awk -F'id,' '/Cpu/ { split($1,a,","); sub("%Cpu(s):","",a[1]); print 100 - a[1] }' | awk '{printf "%.1f", $0}')
+if (( \$(echo "\$cpu > ${CPU_THRESHOLD}" | bc -l) )); then send_alert "High CPU: \${cpu}%"; fi
 
-    # If notification system is configured, send alert
-    if [ -f /root/run_backup.sh ]; then
-        # Extract notification settings from backup script
-        if grep -q "NTFY_URL=" /root/run_backup.sh && ! grep -q 'NTFY_URL=""' /root/run_backup.sh; then
-            NTFY_URL=$(grep "^NTFY_URL=" /root/run_backup.sh | cut -d'"' -f2)
-            NTFY_TOKEN=$(grep "^NTFY_TOKEN=" /root/run_backup.sh | cut -d'"' -f2)
-            curl -s -H "Title: Security Anomaly Detected" ${NTFY_TOKEN:+-H "Authorization: Bearer $NTFY_TOKEN"} -d "$message" "$NTFY_URL" > /dev/null 2>&1 || true
-        elif grep -q "DISCORD_WEBHOOK=" /root/run_backup.sh && ! grep -q 'DISCORD_WEBHOOK=""' /root/run_backup.sh; then
-            DISCORD_WEBHOOK=$(grep "^DISCORD_WEBHOOK=" /root/run_backup.sh | cut -d'"' -f2)
-            local escaped_message=$(echo "$message" | sed 's/"/\\"/g')
-            local json_payload=$(printf '{"embeds": [{"title": "Security Anomaly Detected", "description": "%s", "color": 15158332}]}' "$escaped_message")
-            curl -s -H "Content-Type: application/json" -d "$json_payload" "$DISCORD_WEBHOOK" > /dev/null 2>&1 || true
-        fi
-    fi
-}
+mem=\$(free | awk '/Mem:/ {printf "%.0f", \$3/\$2 * 100}')
+[ "\$mem" -gt ${MEM_THRESHOLD} ] && send_alert "High memory: \${mem}%"
 
-# Check for unusual CPU usage
-check_cpu_usage() {
-    local cpu_usage
-    cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1)
-    if (( $(echo "$cpu_usage > 80" | bc -l) )); then
-        send_alert "High CPU usage detected: ${cpu_usage}%"
-    fi
-}
+conn=\$(ss -tn | tail -n +2 | wc -l)
+[ "\$conn" -gt ${CONN_THRESHOLD} ] && send_alert "High connections: \$conn"
 
-# Check for unusual memory usage
-check_memory_usage() {
-    local mem_usage
-    mem_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100.0}')
-    if [ "$mem_usage" -gt 90 ]; then
-        send_alert "High memory usage detected: ${mem_usage}%"
-    fi
-}
+proc=\$(ps -e | wc -l)
+[ "\$proc" -gt ${PROC_THRESHOLD} ] && send_alert "High process count: \$proc"
 
-# Check for unusual network connections
-check_network_connections() {
-    local conn_count
-    conn_count=$(ss -tn | wc -l)
-    if [ "$conn_count" -gt 200 ]; then
-        send_alert "High number of network connections: $conn_count"
-    fi
-}
-
-# Check for unusual process count
-check_process_count() {
-    local proc_count
-    proc_count=$(ps aux | wc -l)
-    if [ "$proc_count" -gt 300 ]; then
-        send_alert "High process count detected: $proc_count"
-    fi
-}
-
-# Run all checks
-check_cpu_usage
-check_memory_usage
-check_network_connections
-check_process_count
+disk=\$(df -P / | awk 'NR==2 {gsub("%",""); print \$5}')
+[ "\$disk" -gt ${DISK_THRESHOLD} ] && send_alert "High disk usage: \${disk}% on /"
 EOF
-
     chmod +x /usr/local/bin/anomaly-detector.sh
 
-    # Add to cron for every 15 minutes
-    echo "*/15 * * * * /usr/local/bin/anomaly-detector.sh" > /etc/cron.d/anomaly-detector
+    # Cron job
+    cat >/etc/cron.d/anomaly-detector <<'EOF'
+*/15 * * * * root /usr/local/bin/anomaly-detector.sh
+EOF
+    chmod 644 /etc/cron.d/anomaly-detector
 
-    print_success "Behavioral anomaly detection configured."
-    log "Anomaly detection configuration completed."
+    # Logrotate for anomaly detector log
+    if [ ! -f /etc/logrotate.d/anomaly-detector ]; then
+        cat > /etc/logrotate.d/anomaly-detector <<'EOF'
+/var/log/anomaly-detections.log {
+    daily
+    rotate 14
+    compress
+    missingok
+    notifempty
+}
+EOF
+        chmod 644 /etc/logrotate.d/anomaly-detector
+    fi
+
+    print_success "Anomaly detection configured."
+    log "Anomaly detection completed."
 }
 
-# --- Test Intrusion Detection Systems ---
-test_intrusion_detection() {
-    print_section "Intrusion Detection System Test"
+# -----------------------
+# Auditd trimmed integration
+# -----------------------
+configure_auditd() {
+    print_section "auditd integration (trimmed rules)"
 
-    if ! confirm "Test intrusion detection systems?"; then
-        print_info "Skipping IDS test."
+    if ! confirm "Install and enable auditd?"; then
+        print_info "Skipping auditd."
         return 0
     fi
 
-    print_info "Testing OSSEC..."
-    if command -v /var/ossec/bin/ossec-control >/dev/null 2>&1; then
-        if /var/ossec/bin/ossec-control status | grep -q "is running"; then
-            print_success "OSSEC is running properly."
+    if ! is_installed auditd; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq auditd audispd-plugins
+    fi
 
-            # Test OSSEC by triggering a rule
-            touch /etc/ossec-test-file
-            rm /etc/ossec-test-file
-            sleep 2
-            if grep -q "ossec-test-file" /var/ossec/logs/alerts/alerts.log 2>/dev/null; then
-                print_success "OSSEC file monitoring is working."
-            else
-                print_warning "OSSEC file monitoring test inconclusive."
+    AUDIT_RULES_FILE="/etc/audit/rules.d/99-security.rules"
+    # Write trimmed rules only if missing or different
+    AUDIT_RULES_TMP=$(mktemp)
+    cat > "${AUDIT_RULES_TMP}" <<'EOF'
+# Trimmed audit rules - high value events only
+# --- Identity and credential stores ---
+-w /etc/passwd -p wa -k identity
+-w /etc/shadow -p wa -k identity
+-w /etc/group -p wa -k identity
+-w /etc/gshadow -p wa -k identity
+
+# --- Privilege + sudo rules ---
+-w /etc/sudoers -p wa -k privileged
+-w /etc/sudoers.d -p wa -k privileged
+-w /usr/bin/sudo -p x -k privileged
+
+# --- SSH daemon integrity ---
+-w /usr/sbin/sshd -p x -k sshd
+
+# --- Cron persistence mechanisms ---
+-w /etc/cron.allow -p wa -k cron
+-w /etc/cron.d -p wa -k cron
+
+# --- Auth log tampering ---
+-w /var/log/auth.log -p wa -k authlog
+
+# --- Command execution tracking (execve) ---
+# Still the most valuable audit rule on a server
+# but without filtering noise-heavy syscalls.
+-a always,exit -F arch=b64 -S execve -k execs
+-a always,exit -F arch=b32 -S execve -k execs
+EOF
+
+    if [ ! -f "${AUDIT_RULES_FILE}" ] || ! cmp -s "${AUDIT_RULES_TMP}" "${AUDIT_RULES_FILE}"; then
+        mv "${AUDIT_RULES_TMP}" "${AUDIT_RULES_FILE}"
+        chmod 644 "${AUDIT_RULES_FILE}"
+
+        # Optional: Add Docker/Nginx if present (append to the rules file)
+        if command -v docker >/dev/null; then
+            if ! grep -q "-w /usr/bin/docker" "${AUDIT_RULES_FILE}"; then
+                echo "-w /usr/bin/docker -p x -k docker" >> "${AUDIT_RULES_FILE}"
             fi
-        else
-            print_error "OSSEC is not running."
         fi
+        if [ -d /etc/nginx ]; then
+            if ! grep -q "-w /etc/nginx" "${AUDIT_RULES_FILE}"; then
+                echo "-w /etc/nginx -p wa -k nginx" >> "${AUDIT_RULES_FILE}"
+            fi
+        fi
+        augenrules --load >/dev/null 2>&1 || true
+        print_info "Auditd rules updated."
     else
-        print_error "OSSEC is not installed."
+        rm -f "${AUDIT_RULES_TMP}"
+        print_info "Auditd rules already up-to-date."
     fi
 
-    print_info "Testing rootkit detection tools..."
-    if command -v chkrootkit >/dev/null 2>&1; then
-        print_success "chkrootkit is installed."
-        if chkrootkit 2>/dev/null | grep -q "INFECTED"; then
-            print_error "chkrootkit reported potential infections!"
-        else
-            print_success "chkrootkit scan completed without detections."
-        fi
-    else
-        print_error "chkrootkit is not installed."
+    # Logrotate for auditd (only auditd logs)
+    if [ ! -f /etc/logrotate.d/auditd ]; then
+        cat > /etc/logrotate.d/auditd <<'EOF'
+/var/log/audit/*.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    sharedscripts
+    postrotate
+        /usr/sbin/service auditd rotate >/dev/null 2>&1 || true
+    endscript
+}
+EOF
+        chmod 644 /etc/logrotate.d/auditd
     fi
 
-    if command -v rkhunter >/dev/null 2>&1; then
-        print_success "rkhunter is installed."
-        if rkhunter --check --rwo --sk 2>/dev/null; then
-            print_success "rkhunter scan completed without warnings."
-        else
-            print_warning "rkhunter reported warnings (check logs)."
-        fi
-    else
-        print_error "rkhunter is not installed."
-    fi
-
-    print_info "Testing anomaly detection..."
-    if [ -f /usr/local/bin/anomaly-detector.sh ]; then
-        /usr/local/bin/anomaly-detector.sh
-        if [ -f /var/log/anomaly-detections.log ]; then
-            print_success "Anomaly detection script is functional."
-        else
-            print_warning "Anomaly detection test inconclusive."
-        fi
-    else
-        print_error "Anomaly detection script not found."
-    fi
-
-    print_success "Intrusion detection system test completed."
-    log "IDS test completed."
+    systemctl enable --now auditd >/dev/null 2>&1 || true
+    print_success "auditd configured."
+    log "auditd configuration completed."
 }
 
-# --- Main Intrusion Detection Configuration Function ---
-configure_intrusion_detection() {
-    print_section "Intrusion Detection System Setup"
+# -----------------------
+# Test IDS stack (basic)
+# -----------------------
+test_intrusion_detection() {
+    print_section "IDS self-test"
 
-    # Install and configure each component
-    configure_ossec
+    if ! confirm "Run IDS tests (basic)?"; then
+        print_info "Skipping IDS tests."
+        return 0
+    fi
+
+    # Wazuh check
+    print_info "Checking Wazuh manager status..."
+    if [ -x "${WAZUH_CONTROL}" ] && "${WAZUH_CONTROL}" status | grep -q "is running"; then
+        print_success "Wazuh manager running."
+        touch /etc/wazuh-test-file && rm -f /etc/wazuh-test-file
+        sleep 5
+        if [ -f "${WAZUH_ALERTS_LOG}" ] && grep -q "wazuh-test-file" "${WAZUH_ALERTS_LOG}" 2>/dev/null; then
+            print_success "Wazuh file monitoring appears to work."
+        else
+            print_warning "Wazuh file test inconclusive; check Wazuh logs."
+        fi
+    else
+        print_error "Wazuh manager not running or control script missing."
+    fi
+
+    # AIDE
+    if is_installed aide; then
+        if /usr/bin/aide --check >/dev/null 2>&1; then
+            print_success "AIDE check OK."
+        else
+            print_warning "AIDE reported changes or had errors; inspect logs."
+        fi
+    else
+        print_warning "AIDE not installed."
+    fi
+
+    # rkhunter/chkrootkit
+    if is_installed chkrootkit; then
+        chkrootkit 2>&1 | logger -t chkrootkit || true
+    fi
+    if is_installed rkhunter; then
+        rkhunter --check --rwo --sk 2>&1 | logger -t rkhunter || true
+    fi
+
+    # anomaly detector
+    if [ -f /usr/local/bin/anomaly-detector.sh ]; then
+        /usr/local/bin/anomaly-detector.sh || true
+        print_success "Anomaly detector executed."
+    fi
+
+    # auditd
+    if systemctl is-active --quiet auditd; then
+        print_success "auditd active."
+    else
+        print_warning "auditd not active."
+    fi
+
+    print_success "IDS tests completed."
+    log "IDS test finished."
+}
+
+# -----------------------
+# Main orchestration
+# -----------------------
+configure_intrusion_detection() {
+    print_section "Intrusion Detection System Setup (manager-only)"
+    install_mailutils_noninteractive
+    configure_wazuh
+    configure_aide
     configure_rootkit_detection
     configure_log_correlation
     configure_anomaly_detection
-
-    # Test the systems
+    configure_auditd
     test_intrusion_detection
-
-    print_success "Intrusion Detection System configuration completed."
-    log "Intrusion Detection System module completed."
+    print_success "IDS module finished."
+    log "IDS module completed."
 }
+
+# If run directly
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    configure_intrusion_detection
+fi
