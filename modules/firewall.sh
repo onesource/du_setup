@@ -135,17 +135,36 @@ configure_firewall() {
             ufw allow "$PREVIOUS_SSH_PORT"/tcp comment 'Temporary SSH for transition'
         fi
     fi
+
+    # Ensure the new SSH port is allowed before enabling
+    if ! ufw status | grep -qw "$SSH_PORT/tcp"; then
+        print_info "Adding SSH rule for port $SSH_PORT..."
+        ufw allow "$SSH_PORT"/tcp comment 'SSH'
+    fi
+
     print_info "Enabling firewall..."
     if ! ufw --force enable; then
         print_error "Failed to enable UFW. Check 'journalctl -u ufw' for details."
         exit 1
     fi
+
+    # Verify firewall is active and rules are applied
     if ufw status | grep -q "Status: active"; then
         print_success "Firewall is active."
+
+        # Double-check SSH port is allowed
+        if ufw status | grep -qw "$SSH_PORT/tcp"; then
+            print_success "Port $SSH_PORT/tcp is allowed in firewall."
+        else
+            print_error "Port $SSH_PORT/tcp is NOT in firewall rules!"
+            print_info "Attempting to add it again..."
+            ufw allow "$SSH_PORT"/tcp comment 'SSH'
+        fi
     else
         print_error "UFW failed to activate. Check 'journalctl -u ufw' for details."
         exit 1
     fi
+
     print_warning "ACTION REQUIRED: Check your VPS provider's edge firewall to allow opened ports (e.g., $SSH_PORT/tcp, 41641/udp for Tailscale)."
     ufw status verbose | tee -a "$LOG_FILE"
     log "Firewall configuration completed."
