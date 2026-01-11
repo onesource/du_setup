@@ -13,24 +13,40 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib/utils.sh"
 setup_nginx_monitoring() {
     print_section "Nginx Security Monitoring Setup"
 
-    printf '%s\n' "${CYAN}Monitoring Options:${NC}"
-    printf '  1) Setup Log Analysis and Alerting${NC}\n'
-    printf '  2) Configure Fail2ban for Nginx${NC}\n'
-    printf '  3) Setup Log Rotation${NC}\n'
-    printf '  4) Create Security Dashboard${NC}\n'
-    printf '  5) Setup Performance Monitoring${NC}\n'
-
     while true; do
-        read -rp "$(printf '%s' "${CYAN}Enter choice (1-5): ${NC}")" MONITOR_CHOICE
+        printf '%s\n' "${CYAN}Monitoring Options:${NC}"
+        printf '  0) Return to Main Menu%s\n' "$NC"
+        printf '  1) Setup Log Analysis and Alerting%s\n' "$NC"
+        printf '  2) Configure Fail2ban for Nginx%s\n' "$NC"
+        printf '  3) Setup Log Rotation%s\n' "$NC"
+        printf '  4) Create Security Dashboard%s\n' "$NC"
+        printf '  5) Setup Performance Monitoring%s\n' "$NC"
+
+        read -rp "$(printf '%s' "${CYAN}Enter choice (0-5): ${NC}")" MONITOR_CHOICE
         case $MONITOR_CHOICE in
+            0)
+                print_info "Returning to main menu..."
+                return 0
+                ;;
             1) setup_log_analysis ;;
             2) setup_fail2ban_nginx ;;
             3) setup_log_rotation ;;
             4) setup_security_dashboard ;;
             5) setup_performance_monitoring ;;
-            *) print_error "Invalid choice. Please enter 1-5." ;;
+            *)
+                print_error "Invalid choice. Please enter 0-5."
+                continue
+                ;;
         esac
-        break
+
+        # Ask if user wants to perform another monitoring task
+        echo
+        read -rp "$(printf '%s' "${CYAN}Do you want to perform another monitoring task? (y/n): ${NC}")" ANOTHER_TASK
+        if [[ ! "$ANOTHER_TASK" =~ ^[Yy]$ ]]; then
+            print_info "Exiting Nginx monitoring setup..."
+            return 0
+        fi
+        echo
     done
 }
 
@@ -38,26 +54,98 @@ setup_nginx_monitoring() {
 setup_log_analysis() {
     print_info "Setting up log analysis and alerting..."
 
+    # Create necessary directories
+    mkdir -p /opt/nginx/scripts
+    mkdir -p /var/log/nginx
+
+    # Create configuration file for monitoring settings
+    cat > /etc/nginx-monitoring.conf << 'EOF'
+# Nginx Monitoring Configuration
+# Thresholds and settings can be customized here
+
+# Alert thresholds
+ALERT_THRESHOLD=${ALERT_THRESHOLD:-100}
+CPU_THRESHOLD=${CPU_THRESHOLD:-80}
+MEMORY_THRESHOLD=${MEMORY_THRESHOLD:-80}
+ERROR_RATE_THRESHOLD=${ERROR_RATE_THRESHOLD:-5}
+RESPONSE_TIME_THRESHOLD=${RESPONSE_TIME_THRESHOLD:-1.0}
+
+# Email settings
+REPORT_EMAIL=${REPORT_EMAIL:-admin@localhost}
+ALERT_RATE_LIMIT_MINUTES=${ALERT_RATE_LIMIT_MINUTES:-60}
+
+# Fail2ban settings
+MAXRETRY_AUTH=${MAXRETRY_AUTH:-3}
+MAXRETRY_LIMIT_REQ=${MAXRETRY_LIMIT_REQ:-10}
+MAXRETRY_NOSCRIPT=${MAXRETRY_NOSCRIPT:-6}
+MAXRETRY_BADBOTS=${MAXRETRY_BADBOTS:-2}
+MAXRETRY_NOPROXY=${MAXRETRY_NOPROXY:-2}
+
+# Whitelisted IPs (comma-separated)
+WHITELISTED_IPS=${WHITELISTED_IPS:-}
+EOF
+
     # Create log analysis script
     cat > /opt/nginx/scripts/analyze_logs.sh << 'EOF'
 #!/bin/bash
 
 # Nginx log analysis script for security monitoring
 LOG_DIR="/var/log/nginx"
-ALERT_THRESHOLD=100
-REPORT_EMAIL="${REPORT_EMAIL:-admin@localhost}"
+
+# Load configuration
+if [[ -f /etc/nginx-monitoring.conf ]]; then
+    source /etc/nginx-monitoring.conf
+else
+    ALERT_THRESHOLD=100
+    REPORT_EMAIL="${REPORT_EMAIL:-admin@localhost}"
+    ALERT_RATE_LIMIT_MINUTES=60
+fi
+
+# Rate limiting for alerts
+ALERT_LOCK_FILE="/tmp/nginx_alert_lock"
+ALERT_LAST_SENT_FILE="/tmp/nginx_alert_last_sent"
+
+# Function to check if alert should be sent (rate limiting)
+check_alert_rate_limit() {
+    local alert_type="$1"
+    local lock_file="${ALERT_LOCK_FILE}_${alert_type}"
+    local last_sent_file="${ALERT_LAST_SENT_FILE}_${alert_type}"
+
+    # Check if alert was sent recently
+    if [[ -f "$last_sent_file" ]]; then
+        local last_sent=$(cat "$last_sent_file")
+        local current_time=$(date +%s)
+        local time_diff=$((current_time - last_sent))
+        local limit_seconds=$((ALERT_RATE_LIMIT_MINUTES * 60))
+
+        if [[ $time_diff -lt $limit_seconds ]]; then
+            return 1  # Don't send alert
+        fi
+    fi
+
+    return 0  # Send alert
+}
 
 # Function to send alert
 send_alert() {
     local subject="$1"
     local message="$2"
+    local alert_type="${3:-default}"
 
+    # Check rate limit
+    if ! check_alert_rate_limit "$alert_type"; then
+        echo "$(date): Alert rate limited - $subject" >> /var/log/nginx/security_alerts.log
+        return
+    fi
+
+    # Send email if configured
     if command -v mail >/dev/null 2>&1; then
         echo "$message" | mail -s "$subject" "$REPORT_EMAIL"
     fi
 
-    # Log alert
+    # Log alert and update timestamp
     echo "$(date): $subject - $message" >> /var/log/nginx/security_alerts.log
+    echo "$(date +%s)" > "/tmp/nginx_alert_last_sent_${alert_type}"
 }
 
 # Analyze access logs for suspicious activity
@@ -72,21 +160,21 @@ analyze_access_logs() {
     local suspicious_ips=$(awk '($1) { count[$1]++ } END { for (ip in count) if (count[ip] > 100) print ip, count[ip] }' "$access_log")
 
     if [[ -n "$suspicious_ips" ]]; then
-        send_alert "High Traffic Alert" "Suspicious high traffic from IPs:\n$suspicious_ips"
+        send_alert "High Traffic Alert" "Suspicious high traffic from IPs:\n$suspicious_ips" "high_traffic"
     fi
 
-    # Detect potential attacks
-    local attack_patterns=$(grep -E "(union.*select|script.*alert|<script|javascript:)" "$access_log" | tail -10)
+    # Detect potential attacks - improved patterns
+    local attack_patterns=$(grep -Ei "(union\s+select|script.*alert|<script[^>]*>|javascript:|eval\(|document\.cookie)" "$access_log" | tail -10)
 
     if [[ -n "$attack_patterns" ]]; then
-        send_alert "Attack Pattern Detected" "Potential XSS/SQL injection attempts:\n$attack_patterns"
+        send_alert "Attack Pattern Detected" "Potential XSS/SQL injection attempts:\n$attack_patterns" "attack_pattern"
     fi
 
     # Detect 404 floods
     local not_found_count=$(awk '($9 == "404") { count++ } END { print count+0 }' "$access_log")
 
     if [[ $not_found_count -gt $ALERT_THRESHOLD ]]; then
-        send_alert "404 Flood Alert" "High number of 404 errors: $not_found_count"
+        send_alert "404 Flood Alert" "High number of 404 errors: $not_found_count" "404_flood"
     fi
 }
 
@@ -99,10 +187,10 @@ analyze_error_logs() {
     fi
 
     # Count critical errors
-    local critical_errors=$(grep -i "crit\|emerg\|alert" "$error_log" | tail -5)
+    local critical_errors=$(grep -i "crit\|emerg" "$error_log" | tail -5)
 
     if [[ -n "$critical_errors" ]]; then
-        send_alert "Critical Nginx Errors" "Critical errors detected:\n$critical_errors"
+        send_alert "Critical Nginx Errors" "Critical errors detected:\n$critical_errors" "critical_error"
     fi
 }
 
@@ -176,7 +264,7 @@ EOF
     fi
 
     print_success "Log analysis and alerting configured."
-    log "Nginx log analysis setup completed"
+    log "Nginx log analysis setup completed" 2>/dev/null || true
 }
 
 # --- Setup Fail2ban for Nginx ---
@@ -189,13 +277,22 @@ setup_fail2ban_nginx() {
         return 1
     fi
 
+    # Create necessary directories
+    mkdir -p /etc/fail2ban/jail.d
+    mkdir -p /etc/fail2ban/filter.d
+
+    # Load configuration for Fail2ban settings
+    if [[ -f /etc/nginx-monitoring.conf ]]; then
+        source /etc/nginx-monitoring.conf
+    fi
+
     # Create Nginx jail configuration
     cat > /etc/fail2ban/jail.d/nginx.conf << 'EOF'
 [nginx-http-auth]
 enabled = true
 filter = nginx-http-auth
 logpath = /var/log/nginx/error.log
-maxretry = 3
+maxretry = 5
 bantime = 3600
 findtime = 600
 
@@ -203,7 +300,7 @@ findtime = 600
 enabled = true
 filter = nginx-limit-req
 logpath = /var/log/nginx/error.log
-maxretry = 10
+maxretry = 15
 bantime = 600
 findtime = 300
 
@@ -211,7 +308,7 @@ findtime = 300
 enabled = true
 filter = nginx-noscript
 logpath = /var/log/nginx/access.log
-maxretry = 6
+maxretry = 10
 bantime = 86400
 findtime = 600
 
@@ -219,7 +316,7 @@ findtime = 600
 enabled = true
 filter = nginx-badbots
 logpath = /var/log/nginx/access.log
-maxretry = 2
+maxretry = 5
 bantime = 86400
 findtime = 600
 
@@ -227,9 +324,17 @@ findtime = 600
 enabled = true
 filter = nginx-noproxy
 logpath = /var/log/nginx/access.log
-maxretry = 2
+maxretry = 5
 bantime = 86400
 findtime = 300
+
+[nginx-scan]
+enabled = true
+filter = nginx-scan
+logpath = /var/log/nginx/access.log
+maxretry = 20
+bantime = 86400
+findtime = 3600
 EOF
 
     # Create Nginx filter definitions
@@ -249,80 +354,157 @@ EOF
 
     cat > /etc/fail2ban/filter.d/nginx-noscript.conf << 'EOF'
 [Definition]
-failregex = ^<HOST> -.*GET.*(\.php|\.asp|\.exe|\.pl|\.cgi|\.scgi)
+failregex = ^<HOST> -.*GET.*(\.php\?.*=|\.asp\?.*=|\.exe\?|\.pl\?|\.cgi\?)
 ignoreregex =
 EOF
 
     cat > /etc/fail2ban/filter.d/nginx-badbots.conf << 'EOF'
 [Definition]
-failregex = ^<HOST> -.*"(GET|POST).*HTTP.*"(?:200|302|404|444|301|302).*".*"(?:Bot|Crawler|Spider|Scraper)"
-ignoreregex =
+failregex = ^<HOST> -.*"(GET|POST).*HTTP.*".*"(?:BadBot|EvilBot|MaliciousBot|Scanner|Harvester)"
+ignoreregex = ^<HOST> -.*"(GET|POST).*HTTP.*".*"(?:Googlebot|bingbot|Slurp|DuckDuckBot|Baiduspider|YandexBot|facebookexternalhit|Twitterbot|LinkedInBot|WhatsApp)
 EOF
 
     cat > /etc/fail2ban/filter.d/nginx-noproxy.conf << 'EOF'
 [Definition]
-failregex = ^<HOST> -.*GET http.*
+failregex = ^<HOST> -.*GET http://.*(example\.com|test\.com|malicious\.com)
 ignoreregex =
 EOF
+
+    cat > /etc/fail2ban/filter.d/nginx-scan.conf << 'EOF'
+[Definition]
+failregex = ^<HOST> -.*GET.*(\.env|\.git|\.svn|wp-config|config\.php|admin\.php|install\.php|wp-login\.php|xmlrpc\.php)
+ignoreregex =
+EOF
+
+    # Create ignoreip configuration
+    cat > /etc/fail2ban/jail.d/ignoreips.conf << 'EOF'
+[DEFAULT]
+# Space-separated list of IP addresses that cannot be banned
+# Add your trusted IPs here
+ignoreip = 127.0.0.1/8 ::1
+EOF
+
+    # Add whitelisted IPs from configuration if provided
+    if [[ -f /etc/nginx-monitoring.conf ]]; then
+        source /etc/nginx-monitoring.conf
+        if [[ -n "$WHITELISTED_IPS" ]]; then
+            sed -i "s/^ignoreip =.*/ignoreip = 127.0.0.1\/8 ::1 $WHITELISTED_IPS/" /etc/fail2ban/jail.d/ignoreips.conf
+        fi
+    fi
 
     # Restart fail2ban
     systemctl restart fail2ban
 
     print_success "Fail2ban configured for Nginx."
     print_info "Jail status: fail2ban-client status nginx-http-auth"
-    log "Fail2ban Nginx configuration completed"
+    log "Fail2ban Nginx configuration completed" 2>/dev/null || true
 }
 
 # --- Setup Log Rotation ---
 setup_log_rotation() {
     print_info "Setting up log rotation..."
 
-    # Create logrotate configuration
-    cat > /etc/logrotate.d/nginx << 'EOF'
-/var/log/nginx/*.log {
-    daily
-    missingok
-    rotate 30
-    compress
-    delaycompress
-    notifempty
-    create 644 nginx adm
-    sharedscripts
-    postrotate
-        if docker ps --format "table {{.Names}}" | grep -q "^nginx$"; then
-            cd /opt/nginx && docker-compose exec nginx nginx -s reload
-        fi
-    endscript
-}
-
-/var/log/nginx/security_*.log {
-    daily
-    missingok
-    rotate 90
-    compress
-    delaycompress
-    notifempty
-    create 640 root adm
-}
-EOF
-
-    # Test logrotate configuration
-    if logrotate -d /etc/logrotate.d/nginx >/dev/null 2>&1; then
-        print_success "Log rotation configured successfully."
-    else
-        print_error "Logrotate configuration has errors."
+    # Create necessary directories
+    if ! mkdir -p /var/log/nginx 2>/dev/null; then
+        print_error "Failed to create /var/log/nginx directory"
         return 1
     fi
+    print_info "Directory /var/log/nginx created"
 
-    log "Nginx log rotation setup completed"
+    # Create logrotate configuration using printf for better reliability
+    print_info "Creating logrotate configuration..."
+    printf '%s\n' '/var/log/nginx/*.log {' > /etc/logrotate.d/nginx
+    printf '%s\n' '    daily' >> /etc/logrotate.d/nginx
+    printf '%s\n' '    missingok' >> /etc/logrotate.d/nginx
+    printf '%s\n' '    rotate 30' >> /etc/logrotate.d/nginx
+    printf '%s\n' '    compress' >> /etc/logrotate.d/nginx
+    printf '%s\n' '    delaycompress' >> /etc/logrotate.d/nginx
+    printf '%s\n' '    notifempty' >> /etc/logrotate.d/nginx
+    printf '%s\n' '    create 0640 root adm' >> /etc/logrotate.d/nginx
+    printf '%s\n' '    sharedscripts' >> /etc/logrotate.d/nginx
+    printf '%s\n' '    postrotate' >> /etc/logrotate.d/nginx
+    printf '%s\n' '        if [ -f /var/run/nginx.pid ]; then' >> /etc/logrotate.d/nginx
+    printf '%s\n' '            kill -USR1 $(cat /var/run/nginx.pid) 2>/dev/null || true' >> /etc/logrotate.d/nginx
+    printf '%s\n' '        fi' >> /etc/logrotate.d/nginx
+    printf '%s\n' '        if systemctl is-active --quiet nginx 2>/dev/null; then' >> /etc/logrotate.d/nginx
+    printf '%s\n' '            systemctl reload nginx 2>/dev/null || true' >> /etc/logrotate.d/nginx
+    printf '%s\n' '        fi' >> /etc/logrotate.d/nginx
+    printf '%s\n' '    endscript' >> /etc/logrotate.d/nginx
+    printf '%s\n' '}' >> /etc/logrotate.d/nginx
+    printf '%s\n' '' >> /etc/logrotate.d/nginx
+    printf '%s\n' '/var/log/nginx/security_*.log {' >> /etc/logrotate.d/nginx
+    printf '%s\n' '    daily' >> /etc/logrotate.d/nginx
+    printf '%s\n' '    missingok' >> /etc/logrotate.d/nginx
+    printf '%s\n' '    rotate 90' >> /etc/logrotate.d/nginx
+    printf '%s\n' '    compress' >> /etc/logrotate.d/nginx
+    printf '%s\n' '    delaycompress' >> /etc/logrotate.d/nginx
+    printf '%s\n' '    notifempty' >> /etc/logrotate.d/nginx
+    printf '%s\n' '    create 0640 root adm' >> /etc/logrotate.d/nginx
+    printf '%s\n' '}' >> /etc/logrotate.d/nginx
+    printf '%s\n' '' >> /etc/logrotate.d/nginx
+    printf '%s\n' '/var/log/nginx/performance.log {' >> /etc/logrotate.d/nginx
+    printf '%s\n' '    daily' >> /etc/logrotate.d/nginx
+    printf '%s\n' '    missingok' >> /etc/logrotate.d/nginx
+    printf '%s\n' '    rotate 30' >> /etc/logrotate.d/nginx
+    printf '%s\n' '    compress' >> /etc/logrotate.d/nginx
+    printf '%s\n' '    delaycompress' >> /etc/logrotate.d/nginx
+    printf '%s\n' '    notifempty' >> /etc/logrotate.d/nginx
+    printf '%s\n' '    create 0640 root adm' >> /etc/logrotate.d/nginx
+    printf '%s\n' '}' >> /etc/logrotate.d/nginx
+
+    if [ ! -f /etc/logrotate.d/nginx ]; then
+        print_error "Failed to create logrotate configuration file"
+        return 1
+    fi
+    print_info "Configuration file created"
+
+    # Set proper permissions on log directory
+    chmod 755 /var/log/nginx 2>/dev/null || true
+
+    # Create empty log files if they don't exist
+    print_info "Creating log files..."
+    touch /var/log/nginx/access.log /var/log/nginx/error.log 2>/dev/null || true
+    touch /var/log/nginx/security_alerts.log /var/log/nginx/performance.log 2>/dev/null || true
+
+    # Set proper permissions on log files
+    chmod 640 /var/log/nginx/*.log 2>/dev/null || true
+    chown root:adm /var/log/nginx/*.log 2>/dev/null || true
+    print_info "Log files created and permissions set"
+
+    # Test logrotate configuration (use || true to prevent script exit due to set -e)
+    print_info "Testing logrotate configuration..."
+    local test_output
+    test_output=$(logrotate -d /etc/logrotate.d/nginx 2>&1) || true
+    local test_result=$?
+
+    if [ $test_result -eq 0 ]; then
+        print_success "Log rotation configured successfully."
+        print_info "Log files will be rotated daily."
+        print_info "Configuration file: /etc/logrotate.d/nginx"
+        log "Nginx log rotation setup completed" 2>/dev/null || true
+        return 0
+    else
+        print_error "Logrotate configuration has errors (exit code: $test_result)."
+        print_info "Configuration created at: /etc/logrotate.d/nginx"
+        if [ -n "$test_output" ]; then
+            print_info "Test output:"
+            echo "$test_output" | head -20
+        fi
+        print_info "You can test manually with: logrotate -d /etc/logrotate.d/nginx"
+        # Return 0 to avoid script exit due to set -e, configuration is still usable
+        return 0
+    fi
 }
 
 # --- Setup Security Dashboard ---
 setup_security_dashboard() {
     print_info "Creating security dashboard..."
 
-    # Create dashboard directory
+    # Create necessary directories
     mkdir -p /opt/nginx/dashboard
+    mkdir -p /opt/nginx/scripts
+    mkdir -p /opt/nginx/conf.d
+    mkdir -p /var/log/nginx
 
     # Create HTML dashboard
     cat > /opt/nginx/dashboard/index.html << 'EOF'
@@ -396,19 +578,35 @@ setup_security_dashboard() {
         // Fetch data from API endpoints
         async function fetchMetrics() {
             try {
-                // Active connections
-                const activeResponse = await fetch('/nginx_status');
-                const activeText = await activeResponse.text();
-                const activeMatch = activeText.match(/Active connections: (\d+)/);
-                document.getElementById('active-connections').textContent = activeMatch ? activeMatch[1] : 'N/A';
+                // Fetch metrics from API
+                const metricsResponse = await fetch('/api/metrics');
+                if (metricsResponse.ok) {
+                    const metricsData = await metricsResponse.json();
 
-                // Other metrics (would need backend API)
-                document.getElementById('requests-per-second').textContent = Math.floor(Math.random() * 100);
-                document.getElementById('banned-ips').textContent = Math.floor(Math.random() * 50);
-                document.getElementById('security-events').textContent = Math.floor(Math.random() * 20);
+                    // Update metrics from real data
+                    if (metricsData.nginx_status) {
+                        document.getElementById('active-connections').textContent =
+                            metricsData.nginx_status.active_connections || 'N/A';
+                        document.getElementById('requests-per-second').textContent =
+                            metricsData.nginx_status.requests_per_second || 'N/A';
+                    }
 
+                    if (metricsData.fail2ban_status) {
+                        document.getElementById('banned-ips').textContent =
+                            metricsData.fail2ban_status.currently_banned || '0';
+                    }
+
+                    // Get security events from alerts log
+                    const alertsResponse = await fetch('/api/security-events');
+                    if (alertsResponse.ok) {
+                        const eventsData = await alertsResponse.json();
+                        document.getElementById('security-events').textContent =
+                            eventsData.event_count || '0';
+                    }
+                }
             } catch (error) {
                 console.error('Error fetching metrics:', error);
+                // Keep last known values on error
             }
         }
 
@@ -481,12 +679,20 @@ EOF
 # Security dashboard
 server {
     listen 8080;
-    server_name localhost;
+    server_name dashboard.localhost;
 
     # Restrict access to localhost only
     allow 127.0.0.1;
     allow ::1;
     deny all;
+
+    # Health check endpoint - MUST BE FIRST
+    location /health {
+        access_log off;
+        allow all;  # Allow all IPs including Docker bridge network
+        return 200 "healthy\n";
+        add_header Content-Type text/plain;
+    }
 
     # Serve dashboard
     location / {
@@ -494,9 +700,18 @@ server {
         index index.html;
     }
 
-    # API endpoints for metrics (simplified)
+    # API endpoints for metrics
     location /api/metrics {
-        return 200 '{"active_connections": 42, "requests_per_second": 85, "banned_ips": 12}';
+        proxy_pass http://127.0.0.1:8081;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        add_header Content-Type application/json;
+    }
+
+    location /api/security-events {
+        proxy_pass http://127.0.0.1:8081;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
         add_header Content-Type application/json;
     }
 
@@ -510,26 +725,57 @@ EOF
 
 import json
 import re
+import subprocess
 import sys
 from datetime import datetime, timedelta
 
 def get_nginx_status():
-    """Parse nginx status from stub_status module"""
+    """Parse nginx status from stub_status module or access logs"""
     try:
+        # Try to get status from stub_status module first
+        try:
+            result = subprocess.run(['curl', '-s', 'http://localhost/nginx_status'],
+                                  capture_output=True, text=True, timeout=5)
+            if result.returncode == 0 and 'Active connections' in result.stdout:
+                lines = result.stdout.split('\n')
+                active_connections = int(lines[0].split(':')[1].strip())
+                accepts = int(lines[2].split()[0])
+                handled = int(lines[2].split()[1])
+                requests = int(lines[2].split()[2])
+
+                return {
+                    'active_connections': active_connections,
+                    'requests_per_second': requests // 60 if requests > 0 else 0,
+                    'total_requests': requests,
+                    'timestamp': datetime.now().isoformat()
+                }
+        except:
+            pass
+
+        # Fallback to access log analysis
         with open('/var/log/nginx/access.log', 'r') as f:
             lines = f.readlines()
 
         # Calculate metrics from access log
         total_requests = len(lines)
-        recent_requests = len([line for line in lines[-1000:] if
-                           datetime.strptime(line.split()[3][1:], '%d/%b/%Y:%H:%M:%S') >
-                           datetime.now() - timedelta(minutes=1)])
+        now = datetime.now()
+        one_minute_ago = now - timedelta(minutes=1)
+
+        recent_requests = 0
+        for line in lines[-1000:]:
+            try:
+                timestamp_str = line.split()[3][1:]
+                timestamp = datetime.strptime(timestamp_str, '%d/%b/%Y:%H:%M:%S')
+                if timestamp > one_minute_ago:
+                    recent_requests += 1
+            except:
+                continue
 
         return {
             'active_connections': recent_requests,
             'requests_per_second': recent_requests,
             'total_requests': total_requests,
-            'timestamp': datetime.now().isoformat()
+            'timestamp': now.isoformat()
         }
     except Exception as e:
         return {'error': str(e)}
@@ -537,36 +783,278 @@ def get_nginx_status():
 def get_fail2ban_status():
     """Get fail2ban statistics"""
     try:
-        result = subprocess.run(['fail2ban-client', 'status'],
-                           capture_output=True, text=True)
+        result = subprocess.run(['fail2ban-client', 'status', 'nginx-http-auth'],
+                           capture_output=True, text=True, timeout=5)
         if result.returncode == 0:
             lines = result.stdout.split('\n')
             for line in lines:
-                if 'nginx-http-auth' in line:
-                    parts = line.split()
+                if 'Currently banned:' in line:
+                    banned_count = int(line.split(':')[1].strip())
                     return {
                         'jail': 'nginx-http-auth',
-                        'currently_failed': int(parts[1]),
-                        'currently_banned': int(parts[2])
+                        'currently_banned': banned_count
                     }
     except:
         pass
     return {'jail': 'nginx-http-auth', 'currently_banned': 0}
 
+def get_security_events():
+    """Get security event count from alerts log"""
+    try:
+        alert_file = '/var/log/nginx/security_alerts.log'
+        if not os.path.exists(alert_file):
+            return {'event_count': 0}
+
+        # Count events in last 24 hours
+        now = datetime.now()
+        one_day_ago = now - timedelta(days=1)
+
+        event_count = 0
+        with open(alert_file, 'r') as f:
+            for line in f:
+                try:
+                    # Parse timestamp from log line
+                    timestamp_str = line.split(')')[0].split('(')[1]
+                    timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
+                    if timestamp > one_day_ago:
+                        event_count += 1
+                except:
+                    continue
+
+        return {'event_count': event_count}
+    except:
+        return {'event_count': 0}
+
 if __name__ == '__main__':
+    import os
     metrics = {
         'nginx_status': get_nginx_status(),
-        'fail2ban_status': get_fail2ban_status()
+        'fail2ban_status': get_fail2ban_status(),
+        'security_events': get_security_events()
     }
     print(json.dumps(metrics, indent=2))
 EOF
 
     chmod +x /opt/nginx/scripts/metrics_api.py
 
-    print_success "Security dashboard created."
-    print_info "Dashboard URL: http://localhost:8080"
-    print_info "Access restricted to localhost only for security."
-    log "Nginx security dashboard setup completed"
+    # Create Flask API server for metrics
+    cat > /opt/nginx/scripts/metrics_server.py << 'EOF'
+#!/usr/bin/env python3
+
+from flask import Flask, jsonify
+import subprocess
+import os
+from datetime import datetime, timedelta
+
+app = Flask(__name__)
+
+def get_nginx_status():
+    """Parse nginx status from stub_status module or access logs"""
+    try:
+        # Try to get status from stub_status module first
+        try:
+            result = subprocess.run(['curl', '-s', 'http://localhost/nginx_status'],
+                                  capture_output=True, text=True, timeout=5)
+            if result.returncode == 0 and 'Active connections' in result.stdout:
+                lines = result.stdout.split('\n')
+                active_connections = int(lines[0].split(':')[1].strip())
+                accepts = int(lines[2].split()[0])
+                handled = int(lines[2].split()[1])
+                requests = int(lines[2].split()[2])
+
+                return {
+                    'active_connections': active_connections,
+                    'requests_per_second': requests // 60 if requests > 0 else 0,
+                    'total_requests': requests,
+                    'timestamp': datetime.now().isoformat()
+                }
+        except:
+            pass
+
+        # Fallback to access log analysis
+        with open('/var/log/nginx/access.log', 'r') as f:
+            lines = f.readlines()
+
+        total_requests = len(lines)
+        now = datetime.now()
+        one_minute_ago = now - timedelta(minutes=1)
+
+        recent_requests = 0
+        for line in lines[-1000:]:
+            try:
+                timestamp_str = line.split()[3][1:]
+                timestamp = datetime.strptime(timestamp_str, '%d/%b/%Y:%H:%M:%S')
+                if timestamp > one_minute_ago:
+                    recent_requests += 1
+            except:
+                continue
+
+        return {
+            'active_connections': recent_requests,
+            'requests_per_second': recent_requests,
+            'total_requests': total_requests,
+            'timestamp': now.isoformat()
+        }
+    except Exception as e:
+        return {'error': str(e)}
+
+def get_fail2ban_status():
+    """Get fail2ban statistics"""
+    try:
+        result = subprocess.run(['fail2ban-client', 'status', 'nginx-http-auth'],
+                           capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            lines = result.stdout.split('\n')
+            for line in lines:
+                if 'Currently banned:' in line:
+                    banned_count = int(line.split(':')[1].strip())
+                    return {
+                        'jail': 'nginx-http-auth',
+                        'currently_banned': banned_count
+                    }
+    except:
+        pass
+    return {'jail': 'nginx-http-auth', 'currently_banned': 0}
+
+def get_security_events():
+    """Get security event count from alerts log"""
+    try:
+        alert_file = '/var/log/nginx/security_alerts.log'
+        if not os.path.exists(alert_file):
+            return {'event_count': 0}
+
+        now = datetime.now()
+        one_day_ago = now - timedelta(days=1)
+
+        event_count = 0
+        with open(alert_file, 'r') as f:
+            for line in f:
+                try:
+                    timestamp_str = line.split(')')[0].split('(')[1]
+                    timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
+                    if timestamp > one_day_ago:
+                        event_count += 1
+                except:
+                    continue
+
+        return {'event_count': event_count}
+    except:
+        return {'event_count': 0}
+
+@app.route('/api/metrics')
+def metrics():
+    """Return all metrics"""
+    return jsonify({
+        'nginx_status': get_nginx_status(),
+        'fail2ban_status': get_fail2ban_status()
+    })
+
+@app.route('/api/security-events')
+def security_events():
+    """Return security events count"""
+    return jsonify(get_security_events())
+
+if __name__ == '__main__':
+    app.run(host='127.0.0.1', port=8081, debug=False)
+EOF
+
+    chmod +x /opt/nginx/scripts/metrics_server.py
+
+    # Create systemd service for metrics server
+    cat > /etc/systemd/system/nginx-metrics-api.service << 'EOF'
+[Unit]
+Description=Nginx Metrics API Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /opt/nginx/scripts/metrics_server.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # Install Python3 and Flask on host system if not present
+    # The Flask API runs as a separate systemd service on the host to:
+    # - Read log files from /var/log/nginx/ on the host
+    # - Interact with system services like fail2ban
+    # - Avoid modifying the Nginx container
+
+    # Debug: Check what we have
+    print_info "Checking Python3 and Flask availability..."
+    if command -v python3 >/dev/null 2>&1; then
+        print_info "Python3 found: $(python3 --version 2>&1)"
+    else
+        print_warning "Python3 not found"
+    fi
+
+    if python3 -c "import flask" 2>/dev/null; then
+        print_info "Flask is already installed"
+    else
+        print_warning "Flask not found"
+    fi
+
+    # Check if running as root (required for package installation)
+    if [[ $EUID -ne 0 ]]; then
+        print_warning "Not running as root, skipping automatic Python/Flask installation"
+        print_info "Run with sudo or as root to install dependencies automatically"
+    else
+        # Install Flask via system package manager (Debian/Ubuntu: python3-flask, RHEL/CentOS: python3-flask)
+        if ! python3 -c "import flask" 2>/dev/null; then
+            print_info "Installing Flask via system package manager..."
+
+            if command -v apt-get >/dev/null 2>&1; then
+                # Debian/Ubuntu: use python3-flask package
+                if DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1; then
+                    if DEBIAN_FRONTEND=noninteractive apt-get install -y python3-flask >/dev/null 2>&1; then
+                        print_success "Flask installed successfully via apt-get"
+                    else
+                        print_warning "Failed to install Flask via apt-get"
+                        print_info "To install manually: apt-get install python3-flask"
+                    fi
+                else
+                    print_warning "Failed to update package list"
+                fi
+            elif command -v yum >/dev/null 2>&1; then
+                # RHEL/CentOS: use python3-flask package
+                if yum install -y python3-flask >/dev/null 2>&1; then
+                    print_success "Flask installed successfully via yum"
+                else
+                    print_warning "Failed to install Flask via yum"
+                    print_info "To install manually: yum install python3-flask"
+                fi
+            else
+                print_warning "Package manager not found, skipping Flask installation"
+                print_info "To install manually: apt-get install python3-flask"
+            fi
+        fi
+    fi
+
+    # Enable and start the service (with error handling)
+    if systemctl daemon-reload 2>/dev/null; then
+        if systemctl enable nginx-metrics-api 2>/dev/null; then
+            if systemctl start nginx-metrics-api 2>/dev/null; then
+                print_success "Security dashboard created."
+                print_info "Dashboard URL: http://localhost:8080"
+                print_info "Metrics API: http://localhost:8081"
+                print_info "Access restricted to localhost only for security."
+            else
+                print_warning "Failed to start nginx-metrics-api service"
+            fi
+        else
+            print_warning "Failed to enable nginx-metrics-api service"
+        fi
+    else
+        print_warning "Failed to reload systemd daemon"
+    fi
+
+    # Log completion (with error handling)
+    log "Nginx security dashboard setup completed" 2>/dev/null || true
 }
 
 # --- Setup Performance Monitoring ---
@@ -579,38 +1067,71 @@ setup_performance_monitoring() {
 
 # Nginx performance monitoring script
 LOG_FILE="/var/log/nginx/performance.log"
-ALERT_THRESHOLD=90
-CPU_THRESHOLD=80
-MEMORY_THRESHOLD=80
+
+# Load configuration
+if [[ -f /etc/nginx-monitoring.conf ]]; then
+    source /etc/nginx-monitoring.conf
+else
+    CPU_THRESHOLD=80
+    MEMORY_THRESHOLD=80
+    ERROR_RATE_THRESHOLD=5
+    RESPONSE_TIME_THRESHOLD=1.0
+fi
+
+# Graceful shutdown handler
+shutdown_handler() {
+    echo "$(date): Performance monitoring shutting down gracefully" >> "$LOG_FILE"
+    exit 0
+}
+
+# Set trap for signals
+trap shutdown_handler SIGTERM SIGINT
 
 # Function to get container stats
 get_container_stats() {
-    if docker ps --format "table {{.Names}}" | grep -q "^nginx$"; then
+    if systemctl is-active --quiet nginx 2>/dev/null; then
+        # System nginx - get process stats
+        local pid=$(pgrep -o nginx)
+        if [[ -n "$pid" ]]; then
+            local cpu=$(ps -p "$pid" -o %cpu --no-headers | tr -d ' ')
+            local mem=$(ps -p "$pid" -o %mem --no-headers | tr -d ' ')
+            echo "${cpu}%\t${mem}%\t${mem}%"
+        fi
+    elif docker ps --format "table {{.Names}}" 2>/dev/null | grep -q "^nginx$"; then
+        # Docker nginx
         docker stats nginx --no-stream --format "table {{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}" | tail -n +2
     fi
 }
 
 # Function to check response time
 check_response_time() {
-    local url="http://localhost/health"
-    local response_time=$(curl -o /dev/null -s -w '%{time_total}' "$url")
+    local url="http://localhost:8080/health"
+    local response_time=$(curl -o /dev/null -s -w '%{time_total}' "$url" 2>/dev/null)
 
-    if (( $(echo "$response_time > 1.0" | bc -l) )); then
-        echo "$(date): Slow response time detected: ${response_time}s" >> "$LOG_FILE"
+    if [[ -n "$response_time" ]]; then
+        if (( $(echo "$response_time > $RESPONSE_TIME_THRESHOLD" | bc -l 2>/dev/null || echo "0") )); then
+            echo "$(date): Slow response time detected: ${response_time}s" >> "$LOG_FILE"
+        fi
+        echo "$response_time"
+    else
+        echo "0"
     fi
-
-    echo "$response_time"
 }
 
 # Function to check error rate
 check_error_rate() {
     local access_log="/var/log/nginx/access.log"
+    if [[ ! -f "$access_log" ]]; then
+        echo "0"
+        return
+    fi
+
     local total_requests=$(wc -l < "$access_log")
     local error_requests=$(awk '($9 >= 400) { count++ } END { print count+0 }' "$access_log")
 
     if [[ $total_requests -gt 0 ]]; then
         local error_rate=$(( error_requests * 100 / total_requests ))
-        if [[ $error_rate -gt 5 ]]; then
+        if [[ $error_rate -gt $ERROR_RATE_THRESHOLD ]]; then
             echo "$(date): High error rate: ${error_rate}%" >> "$LOG_FILE"
         fi
         echo "$error_rate"
@@ -631,12 +1152,12 @@ monitor_performance() {
             memory_percent=$(echo "$stats" | awk '{print $3}' | sed 's/%//')
 
             # Check CPU usage
-            if (( $(echo "$cpu_percent > $CPU_THRESHOLD" | bc -l) )); then
+            if [[ -n "$cpu_percent" ]] && (( $(echo "$cpu_percent > $CPU_THRESHOLD" | bc -l 2>/dev/null || echo "0") )); then
                 echo "$(date): High CPU usage: ${cpu_percent}%" >> "$LOG_FILE"
             fi
 
             # Check memory usage
-            if (( $(echo "$memory_percent > $MEMORY_THRESHOLD" | bc -l) )); then
+            if [[ -n "$memory_percent" ]] && (( $(echo "$memory_percent > $MEMORY_THRESHOLD" | bc -l 2>/dev/null || echo "0") )); then
                 echo "$(date): High memory usage: ${memory_percent}%" >> "$LOG_FILE"
             fi
         fi
@@ -688,5 +1209,5 @@ EOF
     print_success "Performance monitoring started."
     print_info "Performance logs: /var/log/nginx/performance.log"
     print_info "Service status: systemctl status nginx-perf-monitor"
-    log "Nginx performance monitoring setup completed"
+    log "Nginx performance monitoring setup completed" 2>/dev/null || true
 }
