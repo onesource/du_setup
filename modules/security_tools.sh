@@ -75,19 +75,61 @@ EOF
 
     # --- Restart and Verify Fail2ban ---
     print_info "Enabling and restarting Fail2Ban to apply new rules..."
+
+    # Suppress Python SyntaxWarning messages during fail2ban restart
+    export PYTHONWARNINGS="ignore::SyntaxWarning"
     systemctl enable fail2ban
     systemctl restart fail2ban
-    sleep 2 # Give service a moment to initialize.
+    sleep 5 # Give service more time to initialize and apply SSH port changes.
+    # Reset Python warnings to default
+    unset PYTHONWARNINGS
 
     if systemctl is-active --quiet fail2ban; then
         print_success "Fail2Ban is active with new configuration."
         # Show status of enabled jails for confirmation.
         fail2ban-client status | tee -a "$LOG_FILE"
+
+        # Verify SSH jail is using the correct port
+        local ssh_jail_port=$(fail2ban-client get sshd port 2>/dev/null || echo "unknown")
+        if [[ "$ssh_jail_port" == "$SSH_PORT" ]]; then
+            print_success "SSH jail is correctly monitoring port $SSH_PORT"
+        else
+            print_warning "SSH jail is monitoring port $ssh_jail_port (expected $SSH_PORT)"
+            print_info "Attempting to update SSH jail port..."
+            # Use correct fail2ban-client syntax to set port
+            fail2ban-client set sshd addport "$SSH_PORT" 2>/dev/null || true
+            # If that doesn't work, restart fail2ban to reapply configuration
+            if [[ "$ssh_jail_port" != "$SSH_PORT" ]]; then
+                print_info "Restarting Fail2Ban to apply port configuration..."
+                systemctl restart fail2ban
+                sleep 3
+            fi
+        fi
     else
         print_error "Fail2Ban service failed to start. Check 'journalctl -u fail2ban' for errors."
         FAILED_SERVICES+=("fail2ban")
     fi
     log "Fail2Ban configuration completed."
+
+    # Configure log rotation for Fail2Ban (idempotent)
+    local FAIL2BAN_LOGROTATE="/etc/logrotate.d/fail2ban"
+    if [ ! -f "${FAIL2BAN_LOGROTATE}" ]; then
+        print_info "Configuring log rotation for Fail2Ban..."
+        tee "${FAIL2BAN_LOGROTATE}" > /dev/null <<'EOF'
+/var/log/fail2ban.log {
+    weekly
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 640 root adm
+}
+EOF
+        chmod 644 "${FAIL2BAN_LOGROTATE}"
+    else
+        print_info "Fail2Ban logrotate already configured."
+    fi
 }
 
 # --- Auto Updates Configuration Function ---
@@ -219,32 +261,18 @@ net.core.netdev_max_backlog=5000
 net.core.somaxconn=1024
 net.ipv4.tcp_max_syn_backlog=4096
 EOF
-            sysctl -p "$AMD_EPYC_SYSCTL" >/dev/null 2>&1
-            print_success "AMD EPYC optimizations applied."
-            log "Applied AMD EPYC specific kernel optimizations."
+            # Apply sysctl settings with error handling
+            if sysctl -p "$AMD_EPYC_SYSCTL" >/dev/null 2>&1; then
+                print_success "AMD EPYC optimizations applied."
+                log "Applied AMD EPYC specific kernel optimizations."
+            else
+                print_warning "Some AMD EPYC optimizations could not be applied (this is normal in virtualized environments)."
+                log "Some AMD EPYC optimizations failed to apply."
+            fi
         else
             print_info "AMD EPYC optimizations already exist."
         fi
     fi
-}
-
-# --- AIDE Installation Function ---
-install_aide() {
-    if ! confirm "Install AIDE for intrusion detection?"; then
-        return 0
-    fi
-
-    print_section "Installing AIDE"
-    apt-get install -y aide
-
-    # Initialize AIDE database
-    aide --init
-    mv /var/lib/aide/aide.db.new /var/lib/aide/aide.db
-
-    # Create cron job for daily checks
-    echo "0 5 * * * /usr/bin/aide --check" > /etc/cron.daily/aide
-
-    print_success "AIDE installed and configured"
 }
 
 # --- AppArmor Check Function ---
