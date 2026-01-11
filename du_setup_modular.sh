@@ -2,7 +2,7 @@
 
 # ============================================================================
 # Debian and Ubuntu Server Hardening Interactive Script (Modular Version)
-# Version: 0.74.2_modular | 2025-11-09
+# Version: 0.74.2_modular | 2026-01-10
 #
 # This is the modular version of du_setup.sh that sources separate modules
 # for better maintainability and organization.
@@ -148,6 +148,9 @@ handle_error() {
 main() {
     trap 'handle_error $LINENO' ERR
 
+    # Suppress Python SyntaxWarning messages globally during script execution
+    export PYTHONWARNINGS="ignore::SyntaxWarning"
+
     # Initialize logging
     log "Starting modular Debian/Ubuntu hardening script."
 
@@ -192,11 +195,11 @@ main() {
     # 8. configure_auto_updates() - Set up automatic updates
     # 9. configure_time_sync() - Configure time synchronization
     # 10. configure_kernel_hardening() - Apply kernel security settings
-    # 11. install_aide() - Install file integrity monitoring
-    # 12. check_apparmor() - Check AppArmor profiles
-    # 13. install_docker() - Optional Docker installation
-    # 14. install_tailscale() - Optional Tailscale installation
-    # 15. install_nginx() - Optional Nginx installation (container/host)
+    # 11. check_apparmor() - Check AppArmor profiles
+    # 12. install_docker() - Optional Docker installation
+    # 13. install_tailscale() - Optional Tailscale installation
+    # 14. install_nginx() - Optional Nginx installation (container/host)
+    # 15. configure_intrusion_detection() - Set up intrusion detection (Wazuh, AIDE, etc.)
     # 16. setup_backup() - Configure backup system
     # 17. configure_swap() - Configure swap space
     # 18. configure_security_audit() - Set up security auditing
@@ -212,12 +215,11 @@ main() {
     configure_auto_updates
     configure_time_sync
     configure_kernel_hardening
-    install_aide
     check_apparmor
-    configure_intrusion_detection
     install_docker
     install_tailscale
     install_nginx
+    configure_intrusion_detection
     setup_backup
     configure_swap
     configure_security_audit
