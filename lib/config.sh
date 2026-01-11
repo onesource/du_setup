@@ -7,6 +7,9 @@
 
 # shellcheck disable=SC2034  # Variables are used in other modules that source this file
 
+# --- Admin Info ---
+ADMIN_EMAIL="admin@example.com"
+
 # --- Update Configuration ---
 CURRENT_VERSION="0.74.2_modular"
 SCRIPT_URL="https://raw.githubusercontent.com/onesource/du_setup/refs/heads/main/du_setup_modular.sh"
@@ -77,6 +80,33 @@ AUDIT_RAN=false
 AUDIT_LOG=""
 HARDENING_INDEX=""
 DEBSECAN_VULNS=""
+
+# --- Intrusion Detection Configuration (WAZUH & AIDE) ---
+WAZUH_CONF="/var/ossec/etc/ossec.conf"
+WAZUH_CONTROL="/var/ossec/bin/wazuh-control"
+WAZUH_ALERTS_LOG="/var/ossec/logs/alerts/alerts.log"
+LOCAL_INCLUDE_DIR="/var/ossec/etc/local"
+RULES_INCLUDE_DIR="/var/ossec/etc/rules"
+LOCALFILE_INCLUDE="${LOCAL_INCLUDE_DIR}/localfile_custom.conf"
+SYSCHECK_INCLUDE="${LOCAL_INCLUDE_DIR}/syscheck_custom.conf"
+LOCAL_RULES_FILE="${RULES_INCLUDE_DIR}/local_rules_custom.xml"
+ACTIVE_RESPONSE_DIR="/var/ossec/active-response/bin"
+ACTIVE_RESPONSE_SCRIPT="${ACTIVE_RESPONSE_DIR}/firewall-drop.sh"
+
+RKHUNTER_CONF_LOCAL="/etc/rkhunter.conf.local"
+RKHUNTER_LOG="/var/log/rkhunter.log"  # Assuming standard log path
+AIDE_CONF="/etc/aide/aide.conf"
+AIDE_DB="/var/lib/aide/aide.db"
+
+# Thresholds and Alert Levels
+SSH_FAILURE_THRESHOLD=10
+SUDO_COUNT_THRESHOLD=50
+HIGH_ALERTS_LEVEL="7-9"  # Configurable
+CPU_THRESHOLD=80    # Default CPU usage 80%
+MEM_THRESHOLD=90    # Default Memory usage 90%
+CONN_THRESHOLD=200  # Default Network connections 200
+PROC_THRESHOLD=300  # Default Processes 300
+DISK_THRESHOLD=90  # New: Disk usage %
 
 # --- Initialize Configuration ---
 init_config() {
