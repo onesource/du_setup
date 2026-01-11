@@ -9,6 +9,44 @@
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/config.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/utils.sh"
 
+# ============================================================================
+# Input Validation Functions
+# ============================================================================
+
+# Validate domain name format
+validate_domain() {
+    local domain="$1"
+    if [[ ! "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$ ]]; then
+        print_error "Invalid domain name: $domain"
+        return 1
+    fi
+    return 0
+}
+
+# Validate file path is within allowed directories
+validate_file_path() {
+    local path="$1"
+    # Resolve to absolute path
+    local abs_path=$(realpath "$path" 2>/dev/null || echo "$path")
+    # Check it's within allowed directories
+    if [[ "$abs_path" != /tmp/* ]] && [[ "$abs_path" != /home/* ]] && [[ "$abs_path" != /opt/* ]]; then
+        print_error "Invalid file path: $path"
+        return 1
+    fi
+    return 0
+}
+
+# Escape special characters for nginx config
+escape_nginx_config() {
+    local input="$1"
+    # Escape special characters for nginx config
+    echo "$input" | sed 's/[&/\]/\\&/g'
+}
+
+# ============================================================================
+# Certificate Management Functions
+# ============================================================================
+
 # --- Certificate Management Function ---
 manage_certificates() {
     local single_run="${1:-false}"  # If true, run once and return (for "All Security Features")
@@ -25,7 +63,7 @@ manage_certificates() {
 
         while true; do
             printf '%s\n' "${CYAN}Certificate Management Options:${NC}"
-            printf '  0) Return to Main Menu%s\n' "$NC"
+            printf '  0) Return to Security Configuration Menu%s\n' "$NC"
             printf '  1) Generate Self-Signed Certificate (for testing)%s\n' "$NC"
             printf '  2) Setup Let'\''s Encrypt Certificate (includes auto-renewal option)%s\n' "$NC"
             printf '  3) Import Existing Certificate%s\n' "$NC"
@@ -37,7 +75,7 @@ manage_certificates() {
             read -rp "$(printf '%s' "${CYAN}Enter choice (0-7): ${NC}")" CERT_CHOICE
             case $CERT_CHOICE in
                 0)
-                    print_info "Returning to main menu..."
+                    print_info "Returning to security configuration menu..."
                     return 0
                     ;;
                 1) generate_self_signed_cert; break ;;
@@ -146,11 +184,23 @@ setup_letsencrypt() {
     fi
 
     # Get domain information
-    read -rp "$(printf '%s' "${CYAN}Enter domain name: ${NC}")" DOMAIN
-    if [[ -z "$DOMAIN" ]]; then
-        print_error "Domain name is required."
-        return 1
-    fi
+    local domain_valid=false
+    while [[ "$domain_valid" == "false" ]]; do
+        read -rp "$(printf '%s' "${CYAN}Enter domain name: ${NC}")" DOMAIN
+        if [[ -z "$DOMAIN" ]]; then
+            print_error "Domain name is required."
+            return 1
+        fi
+        if validate_domain "$DOMAIN"; then
+            domain_valid=true
+        else
+            echo
+            if ! confirm "Would you like to enter a different domain?"; then
+                print_info "Returning to security configuration menu..."
+                return 0
+            fi
+        fi
+    done
 
     # Check if certificate already exists for this domain
     if [[ -d "/etc/letsencrypt/live/$DOMAIN" ]]; then
@@ -323,18 +373,50 @@ import_certificate() {
     print_info "Importing existing SSL certificate..."
 
     # Get certificate file path
-    read -rp "$(printf '%s' "${CYAN}Enter path to certificate file (.crt or .pem): ${NC}")" CERT_FILE
-    if [[ ! -f "$CERT_FILE" ]]; then
-        print_error "Certificate file not found: $CERT_FILE"
-        return 1
-    fi
+    local cert_path_valid=false
+    while [[ "$cert_path_valid" == "false" ]]; do
+        read -rp "$(printf '%s' "${CYAN}Enter path to certificate file (.crt or .pem): ${NC}")" CERT_FILE
+        if [[ ! -f "$CERT_FILE" ]]; then
+            print_error "Certificate file not found: $CERT_FILE"
+            if ! confirm "Would you like to enter a different path?"; then
+                print_info "Returning to security configuration menu..."
+                return 0
+            fi
+            continue
+        fi
+        if validate_file_path "$CERT_FILE"; then
+            cert_path_valid=true
+        else
+            echo
+            if ! confirm "Would you like to enter a different path?"; then
+                print_info "Returning to security configuration menu..."
+                return 0
+            fi
+        fi
+    done
 
     # Get private key file path
-    read -rp "$(printf '%s' "${CYAN}Enter path to private key file (.key): ${NC}")" KEY_FILE
-    if [[ ! -f "$KEY_FILE" ]]; then
-        print_error "Private key file not found: $KEY_FILE"
-        return 1
-    fi
+    local key_path_valid=false
+    while [[ "$key_path_valid" == "false" ]]; do
+        read -rp "$(printf '%s' "${CYAN}Enter path to private key file (.key): ${NC}")" KEY_FILE
+        if [[ ! -f "$KEY_FILE" ]]; then
+            print_error "Private key file not found: $KEY_FILE"
+            if ! confirm "Would you like to enter a different path?"; then
+                print_info "Returning to certificate management menu..."
+                return 0
+            fi
+            continue
+        fi
+        if validate_file_path "$KEY_FILE"; then
+            key_path_valid=true
+        else
+            echo
+            if ! confirm "Would you like to enter a different path?"; then
+                print_info "Returning to certificate management menu..."
+                return 0
+            fi
+        fi
+    done
 
     # Validate certificate and key
     if ! openssl x509 -in "$CERT_FILE" -text -noout >/dev/null 2>&1; then
@@ -1219,8 +1301,9 @@ server {
 }
 EOF
 
-        # Replace DOMAIN_PLACEHOLDER with actual domain
-        sed -i "s/DOMAIN_PLACEHOLDER/$domain/g" /etc/nginx/sites-available/https.conf
+        # Replace DOMAIN_PLACEHOLDER with actual domain (escaped for safety)
+        local escaped_domain=$(escape_nginx_config "$domain")
+        sed -i "s/DOMAIN_PLACEHOLDER/$escaped_domain/g" /etc/nginx/sites-available/https.conf
 
         # Enable the site
         ln -sf /etc/nginx/sites-available/https.conf /etc/nginx/sites-enabled/https.conf 2>/dev/null || true
@@ -1330,8 +1413,9 @@ server {
 }
 EOF
 
-        # Replace DOMAIN_PLACEHOLDER with actual domain
-        sed -i "s/DOMAIN_PLACEHOLDER/$domain/g" /opt/nginx/conf.d/https.conf
+        # Replace DOMAIN_PLACEHOLDER with actual domain (escaped for safety)
+        local escaped_domain=$(escape_nginx_config "$domain")
+        sed -i "s/DOMAIN_PLACEHOLDER/$escaped_domain/g" /opt/nginx/conf.d/https.conf
 
         print_success "HTTPS configuration created for $domain."
         print_info "Configuration file: /opt/nginx/conf.d/https.conf"

@@ -77,17 +77,22 @@ install_nginx() {
 
 # --- Configure Nginx Security ---
 configure_nginx_security() {
-    print_section "Nginx Security Configuration"
-
-    printf '%s\n' "${CYAN}Security Configuration Options:${NC}"
-    printf '  1) Certificate Management%s\n' "$NC"
-    printf '  2) Security Monitoring%s\n' "$NC"
-    printf '  3) Vulnerability Scanning%s\n' "$NC"
-    printf '  4) All Security Features%s\n' "$NC"
-
     while true; do
-        read -rp "$(printf '%s' "${CYAN}Enter choice (1-4): ${NC}")" SECURITY_CHOICE
+        print_section "Nginx Security Configuration"
+
+        printf '%s\n' "${CYAN}Security Configuration Options:${NC}"
+        printf '  0) Return to Main Menu%s\n' "$NC"
+        printf '  1) Certificate Management%s\n' "$NC"
+        printf '  2) Security Monitoring%s\n' "$NC"
+        printf '  3) Vulnerability Scanning%s\n' "$NC"
+        printf '  4) All Security Features%s\n' "$NC"
+
+        read -rp "$(printf '%s' "${CYAN}Enter choice (0-4): ${NC}")" SECURITY_CHOICE
         case $SECURITY_CHOICE in
+            0)
+                print_info "Returning to main menu..."
+                return 0
+                ;;
             1)
                 source "$(dirname "${BASH_SOURCE[0]}")/nginx_cert_manager.sh"
                 manage_certificates
@@ -113,9 +118,8 @@ configure_nginx_security() {
 
                 print_success "All security features configured."
                 ;;
-            *) print_error "Invalid choice. Please enter 1-4." ;;
+            *) print_error "Invalid choice. Please enter 0-4." ;;
         esac
-        break
     done
 }
 
