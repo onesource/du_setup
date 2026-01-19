@@ -186,7 +186,7 @@ Banner /etc/issue.net
 MaxStartups 10:30:60
 MaxSessions 3
 ClientAliveCountMax 3
-AllowTcpForwarding no
+AllowTcpForwarding yes
 AllowAgentForwarding no
 TrustedUserCAKeys no
 PermitTunnel no
