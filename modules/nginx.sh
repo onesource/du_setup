@@ -19,58 +19,58 @@ install_nginx() {
 
     print_section "Nginx Installation"
 
-    # Check if Nginx is already installed
+    # Check if Docker is available (required for containerized)
+    if ! command -v docker >/dev/null 2>&1; then
+        print_warning "Docker not found. Host-only installation available."
+    fi
+
+    # Check existing system nginx
     if command -v nginx >/dev/null 2>&1; then
-        print_info "Nginx is already installed on the host."
-        if confirm "Do you want to remove the host installation and use containerized Nginx instead?"; then
+        print_info "System Nginx already installed."
+        if confirm "Remove host Nginx and use containerized instead?"; then
             remove_host_nginx
         else
-            print_info "Keeping existing Nginx installation. Skipping container setup."
-            log "Existing Nginx installation preserved."
+            print_info "Keeping system Nginx. Skipping container setup."
+            log "Existing system Nginx preserved."
+            configure_nginx_security  # Still offer security
             return 0
         fi
     fi
 
-    # Check for existing Nginx containers
-    NGINX_EXISTS=false
-    if command -v docker >/dev/null 2>&1 && docker ps -a --format "table {{.Names}}" | grep -q "^nginx$"; then
-        print_info "Nginx container already exists."
-        NGINX_EXISTS=true
-        if confirm "Do you want to remove the existing container and recreate it?"; then
+    # Check existing container
+    local container_exists=false
+    if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx 'nginx'; then
+        print_info "Nginx container exists (running/stopped)."
+        container_exists=true
+        if confirm "Remove existing container and recreate?"; then
             docker stop nginx >/dev/null 2>&1 || true
             docker rm nginx >/dev/null 2>&1 || true
-            print_info "Existing Nginx container removed."
-            NGINX_EXISTS=false
+            print_info "Container removed."
+            container_exists=false
         else
-            print_info "Keeping existing Nginx container."
-            log "Existing Nginx container preserved."
+            print_info "Keeping existing container."
+            log "Existing container preserved."
         fi
     fi
 
-    # Only ask for installation method if container doesn't exist
-    if [[ "$NGINX_EXISTS" == "false" ]]; then
+    # Install if no existing setup
+    if [[ "$container_exists" == "false" ]]; then
         # Ask for installation method
-        printf '%s\n' "${CYAN}Choose Nginx installation method:${NC}"
+        printf '%s\n' "${CYAN}Choose installation method:${NC}"
         printf '  1) Containerized (recommended) - Docker container with Nginx%s\n' "$NC"
         printf '  2) Host-based - Direct installation on the system%s\n' "$NC"
 
-        while true; do
-            read -rp "$(printf '%s' "${CYAN}Enter choice (1-2) [1]: ${NC}")" NGINX_INSTALL_METHOD
-            NGINX_INSTALL_METHOD=${NGINX_INSTALL_METHOD:-1}
-            case $NGINX_INSTALL_METHOD in
-                1|2) break ;;
-                *) print_error "Invalid choice. Please enter 1 or 2." ;;
-            esac
-        done
-
-        case $NGINX_INSTALL_METHOD in
+        local method=1
+        read -rp "$(printf '%s\n' "${CYAN}Enter choice (1-2) ${NC}")" method
+        [[ "$method" =~ ^[2]$ ]] && method=2
+        case $method in
             1) install_nginx_container ;;
             2) install_nginx_host ;;
-            esac
+        esac
     fi
 
     # Offer security configuration options (always offer, even if container exists)
-    if confirm "Configure additional Nginx security features?"; then
+    if confirm "Configure Nginx security features?"; then
         configure_nginx_security
     fi
 }
@@ -96,6 +96,8 @@ configure_nginx_security() {
             1)
                 source "$(dirname "${BASH_SOURCE[0]}")/nginx_cert_manager.sh"
                 manage_certificates
+                read -rp "$(printf '%s' "${CYAN}Another security task? (y/n): ${NC}")" continue_reply
+                [[ "$continue_reply" =~ ^[Nn] ]] && return 0
                 ;;
             2)
                 source "$(dirname "${BASH_SOURCE[0]}")/nginx_monitoring.sh"
@@ -107,13 +109,13 @@ configure_nginx_security() {
                 ;;
             4)
                 # Install all security features
-                source "$(dirname "${BASH_SOURCE[0]}")/nginx_cert_manager.sh"
+                source "$(dirname "${BASH_SOURCE[0]}")/nginx_cert_manager.sh" 2>/dev/null || true
                 manage_certificates
 
-                source "$(dirname "${BASH_SOURCE[0]}")/nginx_monitoring.sh"
+                source "$(dirname "${BASH_SOURCE[0]}")/nginx_monitoring.sh"   2>/dev/null || true
                 setup_nginx_monitoring
 
-                source "$(dirname "${BASH_SOURCE[0]}")/nginx_vuln_scanner.sh"
+                source "$(dirname "${BASH_SOURCE[0]}")/nginx_vuln_scanner.sh"  2>/dev/null || true
                 manage_vulnerabilities || print_warning "Vulnerability scanning encountered errors"
 
                 print_success "All security features configured."
@@ -125,20 +127,17 @@ configure_nginx_security() {
 
 # --- Containerized Nginx Installation ---
 install_nginx_container() {
-    print_info "Installing containerized Nginx..."
+    print_info "Installing containerized Nginx (nginxinc/nginx-unprivileged:alpine)..."
 
     # Check if Docker is available
-    if ! command -v docker >/dev/null 2>&1; then
-        print_error "Docker is not installed. Cannot install containerized Nginx."
-        print_info "Please install Docker first or choose host-based installation."
-        log "Docker not available for containerized Nginx installation."
-        return 1
-    fi
+    command -v docker >/dev/null 2>&1 || { print_error "Docker required. Please install first."; return 1; }
 
     # Create necessary directories
     print_info "Creating Nginx directories..."
     mkdir -p /opt/nginx/{html,conf.d,logs,certs}
-    mkdir -p /opt/nginx/conf.d/{sites-available,sites-enabled}
+
+    # Pre-create logs to avoid root ownership
+    touch /opt/nginx/logs/{access.log,error.log,security.log}
 
     # Create secure Nginx configuration
     print_info "Creating secure Nginx configuration..."
@@ -197,7 +196,7 @@ http {
 
     # Keep security logs in a dedicated file for host-based scanning
     # This path is inside the container, but maps to /opt/nginx/logs/
-    access_log  /var/log/nginx/security.log security;
+    access_log /var/log/nginx/security.log security;
 
     # Performance settings
     sendfile        on;
@@ -248,7 +247,6 @@ http {
 
     # Include site configurations
     include /etc/nginx/conf.d/*.conf;
-    include /etc/nginx/sites-enabled/*;
 }
 EOF
 
@@ -259,8 +257,8 @@ add_header X-Frame-Options "SAMEORIGIN" always;
 add_header X-Content-Type-Options "nosniff" always;
 add_header X-XSS-Protection "1; mode=block" always;
 add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-# Enhanced CSP to prevent XSS attacks
-add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self'; frame-ancestors 'self'; form-action 'self'; object-src 'none'; base-uri 'self';" always;
+# Enhanced CSP to prevent XSS attacks (allows Chart.js CDN for dashboard)
+add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; img-src 'self' data: https:; font-src 'self' https://cdn.jsdelivr.net; connect-src 'self' https://cdn.jsdelivr.net; frame-ancestors 'self'; form-action 'self'; object-src 'none'; base-uri 'self';" always;
 # HSTS for HTTPS sites (only applied on HTTPS connections)
 add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
 add_header Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=(), magnetometer=(), gyroscope=(), accelerometer=()" always;
@@ -278,7 +276,8 @@ EOF
 # Using nginxinc/nginx-unprivileged:alpine (runs on port 8080)
 server {
     listen 8080;
-    server_name default.localhost;
+    #server_name default.localhost;
+    server_name _;
 
     # Security settings - Rate limiting enabled
     limit_req zone=general burst=40 nodelay;
@@ -297,7 +296,7 @@ server {
     # Health check endpoint - MUST BE FIRST to avoid conflicts with other location blocks
     location /health {
         access_log off;
-        allow all;  # Allow all IPs including Docker bridge network (172.20.0.1)
+        allow all; # Allow all IPs including Docker bridge network (172.20.0.1)
         return 200 "healthy\n";
         add_header Content-Type text/plain;
     }
@@ -349,8 +348,8 @@ server {
         # Security: XSS protection
         add_header X-XSS-Protection "1; mode=block" always;
 
-        # Security: Enhanced XSS protection via CSP
-        add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self'; frame-ancestors 'self'; form-action 'self'; object-src 'none'; base-uri 'self';" always;
+        # Security: Enhanced XSS protection via CSP (allows Chart.js CDN for dashboard)
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; img-src 'self' data: https:; font-src 'self' https://cdn.jsdelivr.net; connect-src 'self' https://cdn.jsdelivr.net; frame-ancestors 'self'; form-action 'self'; object-src 'none'; base-uri 'self';" always;
     }
 
     # Nginx status (restricted to localhost)
@@ -383,7 +382,8 @@ server {
 # }
 #
 # server {
-#     listen 8443 ssl http2;
+#     listen 8443 ssl;
+#     http2 on;
 #     server_name your-domain.com;
 #
 #     # SSL configuration
@@ -453,11 +453,10 @@ FROM nginxinc/nginx-unprivileged:alpine
 
 # Update base packages and install security tools
 USER root
-RUN apk update && apk upgrade && \
-    apk add --no-cache curl ca-certificates && \
+RUN apk update && apk upgrade && apk add --no-cache curl ca-certificates && \
     # Create temp directories and set ownership BEFORE switching users
-    mkdir -p /tmp/client_temp /tmp/proxy_temp /tmp/fastcgi_temp /tmp/uwsgi_temp /tmp/scgi_temp && \
-    chown -R 101:101 /tmp/client_temp /tmp/proxy_temp /tmp/fastcgi_temp /tmp/uwsgi_temp /tmp/scgi_temp /var/cache/nginx && \
+    mkdir -p /tmp/client_temp /var/cache/nginx /tmp/proxy_temp /tmp/fastcgi_temp /tmp/uwsgi_temp /tmp/scgi_temp && \
+    chown -R 101:101 /tmp/client_temp /var/cache/nginx /tmp/proxy_temp /tmp/fastcgi_temp /tmp/uwsgi_temp /tmp/scgi_temp && \
     rm -rf /var/cache/apk/*
 
 # Switch back to unprivileged user
@@ -484,82 +483,7 @@ EXPOSE 8080 8443
 CMD ["nginx", "-g", "daemon off;"]
 EOF
 
-    # Create Dockerfile with headers-more module (optional)
-    cat > /opt/nginx/Dockerfile.headers-more << 'EOF'
-# Security-hardened Nginx Dockerfile with headers-more module
-# This version includes nginx-mod-http-headers-more for more_clear_headers directive
-# Using nginxinc/nginx-unprivileged:alpine as base (runs as UID 101)
-FROM nginxinc/nginx-unprivileged:alpine
-
-# Update base packages and build tools
-USER root
-RUN apk update && apk upgrade && \
-    apk add --no-cache \
-        build-base \
-        pcre-dev \
-        openssl-dev \
-        zlib-dev \
-        linux-headers \
-        curl \
-        ca-certificates \
-        git \
-    && rm -rf /var/cache/apk/*
-
-# Clone and build nginx with headers-more module
-RUN git clone --depth 1 https://github.com/openresty/headers-more-nginx-module.git /tmp/headers-more && \
-    git clone --depth 1 https://github.com/nginx/nginx.git /tmp/nginx && \
-    cd /tmp/nginx && \
-    git checkout $(git tag -l "release-*" | sort -V | tail -1) && \
-    ./auto/configure \
-        --prefix=/etc/nginx \
-        --sbin-path=/usr/sbin/nginx \
-        --conf-path=/etc/nginx/nginx.conf \
-        --error-log-path=/var/log/nginx/error.log \
-        --http-log-path=/var/log/nginx/access.log \
-        --pid-path=/tmp/nginx.pid \
-        --lock-path=/tmp/nginx.lock \
-        --with-http_ssl_module \
-        --with-http_v2_module \
-        --with-http_gzip_static_module \
-        --with-file-aio \
-        --with-http_realip_module \
-        --with-stream \
-        --with-pcre \
-        --add-module=/tmp/headers-more && \
-    make -j$(nproc) && \
-    make install && \
-    cd / && \
-    rm -rf /tmp/nginx /tmp/headers-more && \
-    apk del build-base pcre-dev openssl-dev zlib-dev linux-headers git
-
-# Switch back to unprivileged user
-USER 101
-
-# Copy custom configuration
-COPY nginx.conf /etc/nginx/nginx.conf
-COPY conf.d/ /etc/nginx/conf.d/
-COPY html/ /usr/share/nginx/html/
-
-# Note: Container runs as UID 101 (unprivileged)
-# - Cannot bind to ports below 1024, so we use 8080/8443
-# - PID file is in /tmp/nginx.pid (writable by unprivileged user)
-# - No user directive needed in nginx.conf (handled by image)
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
-
-# Expose ports (unprivileged ports)
-EXPOSE 8080 8443
-
-# Start nginx
-CMD ["nginx", "-g", "daemon off;"]
-EOF
-
     print_info "Note: Standard Dockerfile uses nginxinc/nginx-unprivileged:alpine image (recommended for security)."
-    print_info "      Dockerfile.headers-more includes headers-more module for more_clear_headers directive."
-    print_info "      To use headers-more module, uncomment 'more_clear_headers' directives in configs"
-    print_info "      and use: docker build -f Dockerfile.headers-more -t nginx-nginx ."
 
     # Create secure Docker Compose file
     print_info "Creating secure Docker Compose configuration..."
@@ -572,14 +496,18 @@ services:
     ports:
       - "80:8080"
       - "443:8443"
+      - "8080:8082"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
       - ./conf.d:/etc/nginx/conf.d:ro
       - ./html:/usr/share/nginx/html:ro
+      - ./dashboard:/opt/nginx/dashboard:ro
       - ./logs:/var/log/nginx
       - ./certs:/etc/nginx/certs:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro  # Optional LE mount
     networks:
-      - nginx-network
+      nginx-network:
+        ipv4_address: 172.20.0.2
     security_opt:
       - no-new-privileges:true
     # Note: read_only and tmpfs removed to fix permission issues with nginx user (UID 101)
@@ -589,9 +517,12 @@ services:
       nofile:
         soft: 20000
         hard: 40000
-    pids_limit: 100
-    cpu_shares: 512
-    mem_limit: 512m
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          cpus: '0.5'
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
@@ -599,10 +530,10 @@ services:
       retries: 3
       start_period: 40s
     logging:
-      driver: "json-file"
+      driver: json-file
       options:
-        max-size: "10m"
-        max-file: "3"
+        max-size: 10m
+        max-file: 3
 
 networks:
   nginx-network:
@@ -612,184 +543,111 @@ networks:
         - subnet: 172.20.0.0/16
 EOF
 
-    # Create Docker Compose file for headers-more module (optional)
-    cat > /opt/nginx/docker-compose.headers-more.yml << 'EOF'
-services:
-  nginx:
-    build:
-      context: .
-      dockerfile: Dockerfile.headers-more
-    container_name: nginx
-    restart: unless-stopped
-    ports:
-      - "80:8080"
-      - "443:8443"
-    volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./conf.d:/etc/nginx/conf.d:ro
-      - ./html:/usr/share/nginx/html:ro
-      - ./logs:/var/log/nginx
-      - ./certs:/etc/nginx/certs:ro
-    networks:
-      - nginx-network
-    security_opt:
-      - no-new-privileges:true
-    # Note: read_only and tmpfs removed to fix permission issues with nginx user (UID 101)
-    # The nginx user needs write access to /var/cache/nginx and /var/run
-    ulimits:
-      nproc: 65535
-      nofile:
-        soft: 20000
-        hard: 40000
-    pids_limit: 100
-    cpu_shares: 512
-    mem_limit: 512m
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
 
-networks:
-  nginx-network:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.20.0.0/16
-EOF
 
     # --- Prepare for Deployment ---
-    print_info "Preparing Nginx environment..."
+    print_info "Setting up permissions..."
 
-    # Create the directory first if it doesn't exist
-    mkdir -p /opt/nginx/logs
-    mkdir -p /opt/nginx/certs
-
-    # 1. Pre-create log files to prevent Docker from creating them as root directories
-    # This prevents Docker from auto-creating them as root-owned directories
-    touch /opt/nginx/logs/security.log
-    touch /opt/nginx/logs/access.log
-    touch /opt/nginx/logs/error.log
-
-    # 2. Set proper permissions for unprivileged nginx (UID 101)
+    # Set proper permissions AFTER all files exist for unprivileged nginx (UID 101)
     print_info "Applying file permissions for unprivileged user..."
-    chown -R "$USERNAME:$USERNAME" /opt/nginx
+    # Ensure nginx can read its own configuration files
+    chown -R 101:101 /opt/nginx/{conf.d,logs,certs,html,nginx.conf}
     chmod -R 755 /opt/nginx
 
-    # Logs MUST be writable by nginx user (UID 101) inside container
-    chown -R 101:101 /opt/nginx/logs
+    # MUST be writable by nginx user (UID 101) inside container
     chmod -R 775 /opt/nginx/logs
+    chmod 644 /opt/nginx/nginx.conf /opt/nginx/conf.d/* /opt/nginx/html/*
 
-    # Certs MUST be readable by container's nginx user (UID 101)
-    if [[ -d /opt/nginx/certs ]]; then
-        chown -R 101:101 /opt/nginx/certs
-        # Ensure files are readable but directory remains searchable
-        find /opt/nginx/certs -type f -exec chmod 644 {} +
-        chmod 755 /opt/nginx/certs
-    fi
-
-    # 3. Start Nginx container
+    # Start Nginx container
     print_info "Starting Nginx container..."
     cd /opt/nginx || { print_error "Failed to enter /opt/nginx"; return 1; }
-
-    if docker compose up -d; then
-        print_success "Nginx container started successfully."
-
-        # Wait for container to be ready
-        local retries=20
-        local delay=5
-        local health_passed=false
-
-        for ((i=1; i<=retries; i++)); do
-            # Check if container is running
-            if docker ps --format "table {{.Names}}" | grep -q "^nginx$"; then
-                # Check health from within container (using port 8080)
-                if docker exec nginx curl -f http://localhost:8080/health >/dev/null 2>&1; then
-                    print_success "Nginx is responding to health checks."
-                    health_passed=true
-                    break
-                fi
-            fi
-
-            # Also try from host (using port 80)
-            if curl -f http://localhost/health >/dev/null 2>&1; then
-                print_success "Nginx is responding to health checks from host."
-                health_passed=true
-                break
-            fi
-
-            if [[ $i -eq $retries ]]; then
-                print_warning "Nginx container started but health check failed after $retries attempts."
-                print_info "Container may still be initializing. Check logs with: cd /opt/nginx && docker compose logs -f"
-            fi
-            sleep $delay
-        done
-
-        # Show container status
-        if [[ "$health_passed" == "false" ]]; then
-            print_info "Container status:"
-            docker ps --filter name=nginx --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-        fi
-
-        # Configure firewall if UFW is available
-        if command -v ufw >/dev/null 2>&1; then
-            print_info "Configuring firewall for Nginx..."
-            ufw allow 80/tcp >/dev/null 2>&1 && print_success "Allowed HTTP traffic (port 80)."
-            ufw allow 443/tcp >/dev/null 2>&1 && print_success "Allowed HTTPS traffic (port 443)."
-        fi
-
-        print_info "Nginx container management commands:"
-        print_info "  Start: cd /opt/nginx && docker compose up -d"
-        print_info "  Stop: cd /opt/nginx && docker compose down"
-        print_info "  Restart: cd /opt/nginx && docker compose restart"
-        print_info "  Logs: cd /opt/nginx && docker compose logs -f"
-        print_info "  Config location: /opt/nginx/"
-        print_info ""
-        print_info "Configuration files are mounted from host to container:"
-        print_info "  Main config: /opt/nginx/nginx.conf"
-        print_info "  Site configs: /opt/nginx/conf.d/"
-        print_info "  Web files: /opt/nginx/html/"
-        print_info "  Logs: /opt/nginx/logs/"
-        print_info "  SSL certs: /opt/nginx/certs/"
-        print_info ""
-        print_info "If previous Nginx container was unhealthy, it may have been left in a broken state."
-        print_info "After unhealthy container removal and reinstallation, you may need to rebuild and restart:"
-        print_info "  cd /opt/nginx && docker compose down && docker compose up -d --build"
-        print_info ""
-        print_info "Edit files on the host and reload Nginx: cd /opt/nginx && docker compose exec nginx nginx -s reload"
-        print_info ""
-        print_info "SECURITY NOTE: This setup uses nginxinc/nginx-unprivileged:alpine (runs as UID 101)."
-        print_info "  - Container runs as non-root user for enhanced security"
-        print_info "  - Nginx listens on port 8080/8443 inside container"
-        print_info "  - Docker maps host ports 80/443 to container ports 8080/8443"
-        print_info "  - PID file is in /tmp/nginx.pid (writable by unprivileged user)"
-        print_info ""
-        print_info "To use more_clear_headers directive (requires headers-more module):"
-        print_info "  1. Uncomment 'more_clear_headers' lines in /opt/nginx/nginx.conf"
-        print_info "  2. Uncomment 'more_clear_headers' lines in /opt/nginx/conf.d/default.conf"
-        print_info "  3. Build custom image: cd /opt/nginx && docker build -f Dockerfile.headers-more -t nginx-nginx ."
-        print_info "  4. Use custom compose: cd /opt/nginx && docker compose -f docker-compose.headers-more.yml up -d"
-
-        log "Containerized Nginx installation completed successfully."
-    else
+    if ! run_docker_compose up -d --build; then
         print_error "Failed to start Nginx container."
         log "Containerized Nginx installation failed."
         return 1
     fi
+    print_success "Nginx container started successfully."
+
+        # Wait for container to be ready
+        local retries=20 delay=5 health_passed=false
+        for ((i=1; i<=retries; i++)); do
+            # Check if container is running
+            if docker ps --format '{{.Names}}' | grep -qx 'nginx' && \
+                # Check health from within container (using port 8080)
+                docker exec nginx curl -f http://localhost:8080/health >/dev/null 2>&1; then
+                    print_success "Nginx is responding to health checks."
+                    health_passed=true
+                    break
+            fi
+            sleep $delay
+        done
+
+        [[ "$health_passed" == "true" ]] || print_warning "Health check failed after $retries attempts. Check: docker compose logs"
+
+            # Show container status
+            if [[ "$health_passed" == "false" ]]; then
+                print_info "Container status:"
+                docker ps --filter name=nginx --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+                print_success "Containerized Nginx ready."
+            fi
+
+            # Configure firewall if UFW is available
+            if command -v ufw >/dev/null 2>&1; then
+                print_info "Configuring firewall for Nginx..."
+                ufw allow 8080/tcp >/dev/null 2>&1 && print_success "HTTP (8080) allowed"
+                ufw allow 8443/tcp >/dev/null 2>&1 && print_success "HTTPS (8443) allowed"
+            fi
+
+            print_info "Nginx container management commands:"
+            print_info "  Start: cd /opt/nginx && docker compose up -d"
+            print_info "  Stop: cd /opt/nginx && docker compose down"
+            print_info "  Restart: cd /opt/nginx && docker compose restart"
+            print_info "  Logs: cd /opt/nginx && docker compose logs -f --tail 50"
+            print_info "  Config location: /opt/nginx/"
+            print_info ""
+            print_info "Configuration files are mounted from host to container:"
+            print_info "  Main config: /opt/nginx/nginx.conf"
+            print_info "  Site configs: /opt/nginx/conf.d/"
+            print_info "  Web files: /opt/nginx/html/"
+            print_info "  Logs: /opt/nginx/logs/"
+            print_info "  SSL certs: /opt/nginx/certs/"
+            print_info ""
+            print_info "If previous Nginx container was unhealthy, it may have been left in a broken state."
+            print_info "After unhealthy container removal and reinstallation, you may need to rebuild and restart:"
+            print_info "  cd /opt/nginx && docker compose down && docker compose up -d --build"
+            print_info ""
+            print_info "Edit files on the host and reload Nginx: cd /opt/nginx && docker compose exec nginx nginx -s reload"
+            print_info ""
+            print_info "SECURITY NOTE: This setup uses nginxinc/nginx-unprivileged:alpine (runs as UID 101)."
+            print_info "  - Container runs as non-root user for enhanced security"
+            print_info "  - Nginx listens on port 8080/8443 inside container"
+            print_info "  - Docker maps host ports 80/443 to container ports 8080/8443"
+            print_info "  - PID file is in /tmp/nginx.pid (writable by unprivileged user)"
+
+            log "Containerized Nginx installed successfully."
 }
 
 # --- Host-based Nginx Installation ---
 install_nginx_host() {
     print_info "Installing Nginx on the host..."
 
-    # Update package index
+    # Unified setup FIRST
+    mkdir -p /opt/nginx/{conf.d,html,logs,certs}
+
+    # Remove existing /etc/nginx if it exists
+    rm -rf /etc/nginx
+
+    # Create symbolic link to unified directory
+    ln -sfn /opt/nginx /etc/nginx
+
+    # Set ownership and permissions
+    chown -R www-data:www-data /opt/nginx
+    chmod -R 755 /opt/nginx
+    chmod -R 775 /opt/nginx/logs
+    chmod 644 /opt/nginx/conf.d/* /opt/nginx/certs/*.pem 2>/dev/null || true
+
     print_info "Updating package index..."
+    # apt install
     apt-get update -qq
 
     # Install Nginx
@@ -806,8 +664,7 @@ install_nginx_host() {
     systemctl start nginx
 
     # Wait for service to start
-    local retries=10
-    local delay=2
+    local retries=10 delay=2
     for ((i=1; i<=retries; i++)); do
         if systemctl is-active --quiet nginx; then
             print_success "Nginx service is running."
@@ -823,14 +680,15 @@ install_nginx_host() {
 
     # Configure firewall if UFW is available
     if command -v ufw >/dev/null 2>&1; then
-        print_info "Configuring firewall for Nginx..."
-        ufw allow 'Nginx Full' >/dev/null 2>&1 && print_success "Allowed Nginx traffic (HTTP/HTTPS)."
+        ufw allow 80/tcp  >/dev/null 2>&1 && print_success "HTTP ✓"
+        ufw allow 443/tcp >/dev/null 2>&1 && print_success "HTTPS ✓"
+        ufw reload >/dev/null 2>&1
     fi
 
     # Test Nginx installation
     print_info "Testing Nginx installation..."
-    if curl -f http://localhost >/dev/null 2>&1; then
-        print_success "Nginx is responding correctly."
+    if nginx -t && curl -f http://localhost >/dev/null 2>&1; then
+        print_success "Unified config + response"
     else
         print_warning "Nginx is running but not responding to requests."
     fi
@@ -842,28 +700,80 @@ install_nginx_host() {
     print_info "  Status: sudo systemctl status nginx"
     print_info "  Config location: /etc/nginx/"
     print_info "  Web root: /var/www/html/"
+    print_info "  Unified: /opt/nginx/{conf.d/,certs/,logs/}"
 
-    log "Host-based Nginx installation completed successfully."
+    log "Host nginx unified install done."
 }
 
 # --- Remove Host-based Nginx ---
 remove_host_nginx() {
-    print_info "Removing host-based Nginx installation..."
+    print_info "Removing host nginx (preserves /opt/nginx/ data)..."
 
-    # Stop and disable service
-    systemctl stop nginx >/dev/null 2>&1 || true
-    systemctl disable nginx >/dev/null 2>&1 || true
-
-    # Remove package
-    apt-get remove --purge -y nginx nginx-common nginx-full >/dev/null 2>&1 || true
-    apt-get autoremove -y >/dev/null 2>&1 || true
-
-    # Remove configuration files (preserve user data)
-    print_info "Backing up existing Nginx configuration..."
-    if [[ -d /etc/nginx ]]; then
-        mv /etc/nginx /etc/nginx.backup.$(date +%Y%m%d_%H%M%S) 2>/dev/null || true
+    # Stop and disable nginx if present
+    if command -v systemctl >/dev/null; then
+        systemctl stop nginx 2>/dev/null || true
+        systemctl disable nginx 2>/dev/null || true
     fi
 
-    print_success "Host-based Nginx installation removed."
-    log "Host-based Nginx installation removed."
+    # Remove nginx package (Debian/Ubuntu or Alpine)
+    if command -v apt-get >/dev/null; then
+        apt-get remove --purge -y nginx nginx-common nginx-core >/dev/null 2>&1 || true
+        apt-get autoremove -y >/dev/null 2>&1 || true
+    fi
+
+    # Backup legacy /etc/nginx if it exists and is NOT a symlink
+    if [[ -d /etc/nginx && ! -L /etc/nginx ]]; then
+        local backup="/etc/nginx.backup.$(date +%Y%m%d_%H%M%S)"
+        mv /etc/nginx "$backup" 2>/dev/null || true
+        print_info "Backed up legacy configs: $backup"
+    fi
+
+    # Clean known nginx paths (safe)
+    rm -rf /var/log/nginx /var/www/html 2>/dev/null || true
+
+    # Remove empty /etc/nginx dir only if it still exists and is empty
+    if [[ -d /etc/nginx && -z "$(ls -A /etc/nginx 2>/dev/null)" ]]; then
+        rmdir /etc/nginx 2>/dev/null || true
+    fi
+
+    print_success "Host Nginx installation removed ( /opt/nginx/ preserved )."
+    log "Host nginx removed."
+}
+
+# --- Remove Nginx Docker Container ---
+remove_container_nginx() {
+    local COMPOSE_DIR="/opt/nginx"
+    local CONTAINER_NAME="nginx"
+
+    print_info "Removing nginx Docker container (unprivileged image, data preserved)..."
+
+    # Docker installed?
+    if ! command -v docker >/dev/null; then
+        print_warning "Docker not installed. Skipping container removal."
+        return 0
+    fi
+
+    # Docker daemon running?
+    if ! docker info >/dev/null 2>&1; then
+        print_warning "Docker daemon not running. Skipping container removal."
+        return 0
+    fi
+
+    # Stop container if running
+    if docker ps -q -f name="^/${CONTAINER_NAME}$" | grep -q .; then
+        print_info "Stopping container: $CONTAINER_NAME"
+        docker stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    fi
+
+    # Remove container if it exists
+    if docker ps -aq -f name="^/${CONTAINER_NAME}$" | grep -q .; then
+        print_info "Removing container: $CONTAINER_NAME"
+        docker rm "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    fi
+
+    # Remove image only if unused
+    docker system prune -f -q >/dev/null 2>&1 || true
+
+    print_success "Container nginx removed (/opt/nginx/ preserved)."
+    log "Nginx Docker container removed."
 }
