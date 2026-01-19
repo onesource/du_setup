@@ -58,31 +58,32 @@ setup_log_analysis() {
     mkdir -p /opt/nginx/scripts
     mkdir -p /var/log/nginx
 
-    # Create configuration file for monitoring settings
-    cat > /etc/nginx-monitoring.conf << 'EOF'
+    # Create configuration file for monitoring settings (Overwrites existing)
+    print_info "Updating monitoring configuration file: /etc/nginx-monitoring.conf"
+    cat > /etc/nginx-monitoring.conf << EOF
 # Nginx Monitoring Configuration
 # Thresholds and settings can be customized here
 
 # Alert thresholds
-ALERT_THRESHOLD=${ALERT_THRESHOLD:-100}
-CPU_THRESHOLD=${CPU_THRESHOLD:-80}
-MEMORY_THRESHOLD=${MEMORY_THRESHOLD:-80}
-ERROR_RATE_THRESHOLD=${ERROR_RATE_THRESHOLD:-5}
-RESPONSE_TIME_THRESHOLD=${RESPONSE_TIME_THRESHOLD:-1.0}
+ALERT_THRESHOLD=\${ALERT_THRESHOLD:-100}
+CPU_THRESHOLD=\${CPU_THRESHOLD:-80}
+MEMORY_THRESHOLD=\${MEMORY_THRESHOLD:-80}
+ERROR_RATE_THRESHOLD=\${ERROR_RATE_THRESHOLD:-5}
+RESPONSE_TIME_THRESHOLD=\${RESPONSE_TIME_THRESHOLD:-1.0}
 
 # Email settings
-REPORT_EMAIL=${REPORT_EMAIL:-admin@localhost}
-ALERT_RATE_LIMIT_MINUTES=${ALERT_RATE_LIMIT_MINUTES:-60}
+REPORT_EMAIL=\${REPORT_EMAIL:-$ADMIN_EMAIL}
+ALERT_RATE_LIMIT_MINUTES=\${ALERT_RATE_LIMIT_MINUTES:-60}
 
 # Fail2ban settings
-MAXRETRY_AUTH=${MAXRETRY_AUTH:-3}
-MAXRETRY_LIMIT_REQ=${MAXRETRY_LIMIT_REQ:-10}
-MAXRETRY_NOSCRIPT=${MAXRETRY_NOSCRIPT:-6}
-MAXRETRY_BADBOTS=${MAXRETRY_BADBOTS:-2}
-MAXRETRY_NOPROXY=${MAXRETRY_NOPROXY:-2}
+MAXRETRY_AUTH=\${MAXRETRY_AUTH:-3}
+MAXRETRY_LIMIT_REQ=\${MAXRETRY_LIMIT_REQ:-10}
+MAXRETRY_NOSCRIPT=\${MAXRETRY_NOSCRIPT:-6}
+MAXRETRY_BADBOTS=\${MAXRETRY_BADBOTS:-2}
+MAXRETRY_NOPROXY=\${MAXRETRY_NOPROXY:-2}
 
 # Whitelisted IPs (comma-separated)
-WHITELISTED_IPS=${WHITELISTED_IPS:-}
+WHITELISTED_IPS=\${WHITELISTED_IPS:-}
 EOF
 
     # Create log analysis script
@@ -251,18 +252,16 @@ EOF
 
     # Create security alerts log
     touch /var/log/nginx/security_alerts.log
-    chown root:adm /var/log/nginx/security_alerts.log
-    chmod 640 /var/log/nginx/security_alerts.log
+    chmod 600 /var/log/nginx/security_alerts.log
+    chown root:root /var/log/nginx/security_alerts.log
 
     # Setup cron jobs for log analysis
-    if ! crontab -l 2>/dev/null | grep -q "analyze_logs.sh"; then
-        (crontab -l 2>/dev/null; echo "*/5 * * * * /opt/nginx/scripts/analyze_logs.sh analyze") | crontab -
-        (crontab -l 2>/dev/null; echo "0 6 * * * /opt/nginx/scripts/analyze_logs.sh report") | crontab -
-        print_success "Log analysis cron jobs created."
-    else
-        print_info "Log analysis cron jobs already exist."
+    if crontab -l 2>/dev/null | grep -q "analyze_logs.sh"; then
+        print_info "Updating log analysis cron jobs..."
+        (crontab -l 2>/dev/null | grep -v "analyze_logs.sh") | crontab -
     fi
-
+    (crontab -l 2>/dev/null; echo "*/5 * * * * /opt/nginx/scripts/analyze_logs.sh analyze") | crontab -
+    (crontab -l 2>/dev/null; echo "0 6 * * * /opt/nginx/scripts/analyze_logs.sh report") | crontab -
     print_success "Log analysis and alerting configured."
     log "Nginx log analysis setup completed" 2>/dev/null || true
 }
@@ -286,7 +285,8 @@ setup_fail2ban_nginx() {
         source /etc/nginx-monitoring.conf
     fi
 
-    # Create Nginx jail configuration
+    # Create Nginx jail configuration (Overwrites existing)
+    print_info "Updating Nginx jail configuration: /etc/fail2ban/jail.d/nginx.conf"
     cat > /etc/fail2ban/jail.d/nginx.conf << 'EOF'
 [nginx-http-auth]
 enabled = true
@@ -467,8 +467,17 @@ setup_log_rotation() {
     touch /var/log/nginx/security_alerts.log /var/log/nginx/performance.log 2>/dev/null || true
 
     # Set proper permissions on log files
+    chmod 600 /var/log/nginx/security_alerts.log 2>/dev/null || true
     chmod 640 /var/log/nginx/*.log 2>/dev/null || true
-    chown root:adm /var/log/nginx/*.log 2>/dev/null || true
+    
+    # Set ownership for unprivileged Nginx (UID 101) if in Docker
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'nginx'; then
+        chown -R 101:101 /var/log/nginx 2>/dev/null || true
+        print_info "Log files ownership set to UID 101 for Docker Nginx"
+    else
+        chown root:root /var/log/nginx/security_alerts.log 2>/dev/null || true
+        chown root:adm /var/log/nginx/*.log 2>/dev/null || true
+    fi
     print_info "Log files created and permissions set"
 
     # Test logrotate configuration (use || true to prevent script exit due to set -e)
@@ -523,7 +532,8 @@ setup_security_dashboard() {
         .metric { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
         .metric h3 { margin: 0 0 10px 0; color: #2c3e50; }
         .metric-value { font-size: 2em; font-weight: bold; color: #3498db; }
-        .chart-container { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin: 20px 0; }
+        .chart-container { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin: 20px 0; max-height: 400px; }
+        .chart-container canvas { max-height: 300px; }
         .status-good { color: #27ae60; }
         .status-warning { color: #f39c12; }
         .status-danger { color: #e74c3c; }
@@ -541,20 +551,24 @@ setup_security_dashboard() {
 
         <div class="metrics">
             <div class="metric">
-                <h3>Active Connections</h3>
+                <h3>Direct Connections</h3>
                 <div class="metric-value" id="active-connections">-</div>
+                <small>Active TCP/HTTP streams</small>
             </div>
             <div class="metric">
-                <h3>Requests/Second</h3>
-                <div class="metric-value" id="requests-per-second">-</div>
+                <h3>Unique Visitors (1h)</h3>
+                <div class="metric-value" id="unique-visitors">-</div>
+                <small>Distinct IP addresses</small>
             </div>
             <div class="metric">
                 <h3>Banned IPs</h3>
                 <div class="metric-value" id="banned-ips">-</div>
+                <small>Blocked by Fail2ban</small>
             </div>
             <div class="metric">
-                <h3>Security Events</h3>
+                <h3>Security Alerts</h3>
                 <div class="metric-value" id="security-events">-</div>
+                <small>Suspicious patterns detected</small>
             </div>
         </div>
 
@@ -569,106 +583,188 @@ setup_security_dashboard() {
         </div>
 
         <div class="chart-container">
+            <h3>Security Event Breakdown</h3>
+            <div id="threat-list" style="margin-top: 10px;">
+                <p style="color: #666; font-style: italic;">No specific threats categorized yet...</p>
+            </div>
+        </div>
+
+        <div class="chart-container">
             <h3>Top Attack Sources</h3>
             <canvas id="attackChart"></canvas>
         </div>
     </div>
 
     <script>
+        // Global chart instances
+        let requestChart, statusChart, attackChart;
+
         // Fetch data from API endpoints
         async function fetchMetrics() {
+            console.log("Fetching metrics...");
             try {
-                // Fetch metrics from API
-                const metricsResponse = await fetch('/api/metrics');
-                if (metricsResponse.ok) {
-                    const metricsData = await metricsResponse.json();
+                const response = await fetch('/api/metrics');
+                console.log("Response status:", response.status);
+                if (!response.ok) throw new Error('API response not OK: ' + response.status);
+                const data = await response.json();
+                console.log("Data received:", data);
 
-                    // Update metrics from real data
-                    if (metricsData.nginx_status) {
-                        document.getElementById('active-connections').textContent =
-                            metricsData.nginx_status.active_connections || 'N/A';
-                        document.getElementById('requests-per-second').textContent =
-                            metricsData.nginx_status.requests_per_second || 'N/A';
-                    }
+                // Update summary metrics
+                if (data.nginx_status) {
+                    document.getElementById('active-connections').textContent = 
+                        data.nginx_status.active_connections || '0';
+                    document.getElementById('unique-visitors').textContent = 
+                        data.nginx_status.unique_visitors || '0';
+                }
 
-                    if (metricsData.fail2ban_status) {
-                        document.getElementById('banned-ips').textContent =
-                            metricsData.fail2ban_status.currently_banned || '0';
-                    }
+                if (data.fail2ban_status) {
+                    document.getElementById('banned-ips').textContent = 
+                        data.fail2ban_status.currently_banned || '0';
+                }
 
-                    // Get security events from alerts log
-                    const alertsResponse = await fetch('/api/security-events');
-                    if (alertsResponse.ok) {
-                        const eventsData = await alertsResponse.json();
-                        document.getElementById('security-events').textContent =
-                            eventsData.event_count || '0';
+                if (data.security_events) {
+                    document.getElementById('security-events').textContent = 
+                        data.security_events.total_detections || '0';
+                }
+
+                // Update Request Trends Chart
+                if (data.request_trends && requestChart) {
+                    requestChart.data.datasets[0].data = data.request_trends.values;
+                    requestChart.data.labels = data.request_trends.labels;
+                    requestChart.update();
+                }
+
+                // Update Status Codes Chart
+                if (data.status_distribution && statusChart) {
+                    statusChart.data.datasets[0].data = [
+                        data.status_distribution['2xx'] || 0,
+                        data.status_distribution['3xx'] || 0,
+                        data.status_distribution['4xx'] || 0,
+                        data.status_distribution['5xx'] || 0,
+                        data.status_distribution['Others'] || 0
+                    ];
+                    statusChart.update();
+                }
+
+                // Update Security Event Breakdown
+                if (data.security_events && data.security_events.threat_breakdown) {
+                    const breakdown = data.security_events.threat_breakdown;
+                    const container = document.getElementById('threat-list');
+                    
+                    const descriptions = {
+                        'SQL Injection': 'Attempts to execute malicious SQL statements to steal or manipulate data.',
+                        'XSS/Injection': 'Attempts to inject malicious scripts into web pages viewed by other users.',
+                        'Path Traversal': 'Attempts to access files and directories stored outside the web root.',
+                        'Brute Force/Admin': 'Automated attempts to guess passwords or access admin interfaces.',
+                        'Exploit/Execution': 'Attempts to execute arbitrary code or system commands on the server.',
+                        'Scan/Probing': 'Automated tools searching for vulnerabilities or sensitive files.',
+                        'Alert Log Entry': 'Security events captured by dedicated logs (e.g., Fail2ban).'
+                    };
+
+                    if (Object.keys(breakdown).length > 0) {
+                        let html = '<table style="width: 100%; border-collapse: collapse;">';
+                        for (const [type, count] of Object.entries(breakdown)) {
+                            if (count > 0) {
+                                const desc = descriptions[type] || 'Suspicious activity pattern detected.';
+                                html += `<tr style="border-bottom: 1px solid #eee;" title="${desc}">
+                                    <td style="padding: 8px 0; color: #e74c3c; font-weight: bold; cursor: help;">${type}</td>
+                                    <td style="padding: 8px 0; text-align: right;">${count} detections</td>
+                                </tr>`;
+                            }
+                        }
+                        html += '</table>';
+                        container.innerHTML = html;
                     }
                 }
+
+                // Update Attack Sources Chart
+                if (data.top_attacks && attackChart) {
+                    attackChart.data.labels = data.top_attacks.map(a => a.ip);
+                    attackChart.data.datasets[0].data = data.top_attacks.map(a => a.count);
+                    attackChart.update();
+                }
+
             } catch (error) {
                 console.error('Error fetching metrics:', error);
-                // Keep last known values on error
             }
         }
 
         // Initialize charts
         function initCharts() {
-            // Request trends chart
-            const requestCtx = document.getElementById('requestChart').getContext('2d');
-            new Chart(requestCtx, {
-                type: 'line',
-                data: {
-                    labels: Array.from({length: 60}, (_, i) => `${60-i}m`),
-                    datasets: [{
-                        label: 'Requests',
-                        data: Array.from({length: 60}, () => Math.floor(Math.random() * 100)),
-                        borderColor: '#3498db',
-                        backgroundColor: 'rgba(52, 152, 219, 0.1)',
-                        tension: 0.4
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    scales: { y: { beginAtZero: true } }
-                }
-            });
+            if (typeof Chart === 'undefined') {
+                console.warn("Chart.js not loaded. Charts will not be initialized.");
+                return;
+            }
 
-            // Status codes chart
-            const statusCtx = document.getElementById('statusChart').getContext('2d');
-            new Chart(statusCtx, {
-                type: 'doughnut',
-                data: {
-                    labels: ['200 OK', '404 Not Found', '500 Error', 'Others'],
-                    datasets: [{
-                        data: [75, 15, 5, 5],
-                        backgroundColor: ['#27ae60', '#f39c12', '#e74c3c', '#95a5a6']
-                    }]
-                },
-                options: { responsive: true }
-            });
+            try {
+                // Request trends chart
+                const requestCtx = document.getElementById('requestChart').getContext('2d');
+                requestChart = new Chart(requestCtx, {
+                    type: 'line',
+                    data: {
+                        labels: [],
+                        datasets: [{
+                            label: 'Requests/min',
+                            data: [],
+                            borderColor: '#3498db',
+                            backgroundColor: 'rgba(52, 152, 219, 0.1)',
+                            tension: 0.4,
+                            fill: true
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        scales: { y: { beginAtZero: true } },
+                        animation: { duration: 0 }
+                    }
+                });
 
-            // Attack sources chart
-            const attackCtx = document.getElementById('attackChart').getContext('2d');
-            new Chart(attackCtx, {
-                type: 'bar',
-                data: {
-                    labels: ['Russia', 'China', 'USA', 'Brazil', 'Others'],
-                    datasets: [{
-                        label: 'Attack Attempts',
-                        data: [45, 32, 28, 15, 12],
-                        backgroundColor: '#e74c3c'
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    scales: { y: { beginAtZero: true } }
-                }
-            });
+                // Status codes chart
+                const statusCtx = document.getElementById('statusChart').getContext('2d');
+                statusChart = new Chart(statusCtx, {
+                    type: 'doughnut',
+                    data: {
+                        labels: ['2xx Success', '3xx Redirect', '4xx Client Error', '5xx Server Error', 'Others'],
+                        datasets: [{
+                            data: [0, 0, 0, 0, 0],
+                            backgroundColor: ['#27ae60', '#3498db', '#f39c12', '#e74c3c', '#95a5a6']
+                        }]
+                    },
+                    options: { 
+                        responsive: true,
+                        maintainAspectRatio: false
+                    }
+                });
+
+                // Attack sources chart
+                const attackCtx = document.getElementById('attackChart').getContext('2d');
+                attackChart = new Chart(attackCtx, {
+                    type: 'bar',
+                    data: {
+                        labels: [],
+                        datasets: [{
+                            label: 'Security Events',
+                            data: [],
+                            backgroundColor: '#e74c3c'
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: { y: { beginAtZero: true } }
+                    }
+                });
+            } catch (err) {
+                console.error("Error initializing charts:", err);
+            }
         }
 
         // Initialize and refresh
-        initCharts();
-        fetchMetrics();
-        setInterval(fetchMetrics, 30000); // Refresh every 30 seconds
+        document.addEventListener('DOMContentLoaded', () => {
+            initCharts();
+            fetchMetrics();
+            setInterval(fetchMetrics, 30000); // Refresh every 30 seconds
+        });
     </script>
 </body>
 </html>
@@ -678,12 +774,13 @@ EOF
     cat > /opt/nginx/conf.d/dashboard.conf << 'EOF'
 # Security dashboard
 server {
-    listen 8080;
-    server_name dashboard.localhost;
+    listen 8082;
+    server_name _;
 
-    # Restrict access to localhost only
+    # Restrict access to localhost and Docker bridge
     allow 127.0.0.1;
     allow ::1;
+    allow 172.20.0.0/16;
     deny all;
 
     # Health check endpoint - MUST BE FIRST
@@ -698,18 +795,20 @@ server {
     location / {
         root /opt/nginx/dashboard;
         index index.html;
+        # CSP to allow Chart.js CDN (required for dashboard)
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; img-src 'self' data: https:; font-src 'self' https://cdn.jsdelivr.net; connect-src 'self' https://cdn.jsdelivr.net; frame-ancestors 'self'; form-action 'self'; object-src 'none'; base-uri 'self';" always;
     }
 
     # API endpoints for metrics
     location /api/metrics {
-        proxy_pass http://127.0.0.1:8081;
+        proxy_pass http://172.20.0.1:8081;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         add_header Content-Type application/json;
     }
 
     location /api/security-events {
-        proxy_pass http://127.0.0.1:8081;
+        proxy_pass http://172.20.0.1:8081;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         add_header Content-Type application/json;
@@ -844,59 +943,84 @@ EOF
 from flask import Flask, jsonify
 import subprocess
 import os
+import re
 from datetime import datetime, timedelta
+from collections import Counter
 
 app = Flask(__name__)
 
+# Detect best log paths
+def find_log_path(filenames, fallback):
+    for path in ['/opt/nginx/logs', '/var/log/nginx']:
+        for f in filenames:
+            full_path = os.path.join(path, f)
+            if os.path.exists(full_path) and os.path.getsize(full_path) > 0:
+                return full_path
+    return fallback
+
+ACCESS_LOG = find_log_path(['security.log', 'https_access.log', 'default_access.log', 'access.log'], '/var/log/nginx/access.log')
+ERROR_LOG = find_log_path(['error.log', 'default_error.log'], '/var/log/nginx/error.log')
+ALERTS_LOG = find_log_path(['security_alerts.log'], '/var/log/nginx/security_alerts.log')
+
+def get_last_lines(filepath, num_lines=1000):
+    """Efficiently read the last N lines of a file"""
+    if not os.path.exists(filepath): return []
+    try:
+        with open(filepath, 'rb') as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            # Read last 2MB to find lines
+            offset = min(size, 2048 * 1024)
+            f.seek(size - offset)
+            chunk = f.read().decode('utf-8', errors='ignore')
+            return chunk.splitlines()[-num_lines:]
+    except: return []
+
 def get_nginx_status():
     """Parse nginx status from stub_status module or access logs"""
+    status = {
+        'active_connections': 0,
+        'unique_visitors': 0,
+        'total_requests': 0
+    }
+    
+    # 1. Try stub_status
     try:
-        # Try to get status from stub_status module first
-        try:
-            result = subprocess.run(['curl', '-s', 'http://localhost/nginx_status'],
-                                  capture_output=True, text=True, timeout=5)
-            if result.returncode == 0 and 'Active connections' in result.stdout:
-                lines = result.stdout.split('\n')
-                active_connections = int(lines[0].split(':')[1].strip())
-                accepts = int(lines[2].split()[0])
-                handled = int(lines[2].split()[1])
-                requests = int(lines[2].split()[2])
+        result = subprocess.run(['curl', '-s', 'http://localhost/nginx_status'],
+                              capture_output=True, text=True, timeout=2)
+        if result.returncode == 0 and 'Active connections' in result.stdout:
+            lines = result.stdout.split('\n')
+            status['active_connections'] = int(lines[0].split(':')[1].strip())
+            status['total_requests'] = int(lines[2].split()[2])
+    except: pass
 
-                return {
-                    'active_connections': active_connections,
-                    'requests_per_second': requests // 60 if requests > 0 else 0,
-                    'total_requests': requests,
-                    'timestamp': datetime.now().isoformat()
-                }
-        except:
-            pass
-
-        # Fallback to access log analysis
-        with open('/var/log/nginx/access.log', 'r') as f:
-            lines = f.readlines()
-
-        total_requests = len(lines)
-        now = datetime.now()
-        one_minute_ago = now - timedelta(minutes=1)
-
-        recent_requests = 0
-        for line in lines[-1000:]:
-            try:
-                timestamp_str = line.split()[3][1:]
-                timestamp = datetime.strptime(timestamp_str, '%d/%b/%Y:%H:%M:%S')
-                if timestamp > one_minute_ago:
-                    recent_requests += 1
-            except:
-                continue
-
-        return {
-            'active_connections': recent_requests,
-            'requests_per_second': recent_requests,
-            'total_requests': total_requests,
-            'timestamp': now.isoformat()
-        }
-    except Exception as e:
-        return {'error': str(e)}
+    # 2. Get unique visitors from last hour of access log
+    try:
+        lines = get_last_lines(ACCESS_LOG, 5000)
+        ips = set()
+        recent_count = 0
+        if lines:
+            # Use the latest timestamp in the log as 'now'
+            latest_ts = None
+            for line in reversed(lines):
+                try:
+                    match = re.search(r'\[(\d{2}/[A-Z][a-z]{2}/\d{4}:\d{2}:\d{2}:\d{2})', line)
+                    if match:
+                        ts = datetime.strptime(match.group(1), '%d/%b/%Y:%H:%M:%S')
+                        if not latest_ts: latest_ts = ts
+                        
+                        # Within last hour
+                        if ts > (latest_ts - timedelta(hours=1)):
+                            ip = line.split()[0]
+                            ips.add(ip)
+                        else: break
+                except: continue
+        
+        status['unique_visitors'] = len(ips)
+        if status['total_requests'] == 0: status['total_requests'] = len(lines)
+    except: pass
+    
+    return status
 
 def get_fail2ban_status():
     """Get fail2ban statistics"""
@@ -904,58 +1028,147 @@ def get_fail2ban_status():
         result = subprocess.run(['fail2ban-client', 'status', 'nginx-http-auth'],
                            capture_output=True, text=True, timeout=5)
         if result.returncode == 0:
-            lines = result.stdout.split('\n')
-            for line in lines:
-                if 'Currently banned:' in line:
-                    banned_count = int(line.split(':')[1].strip())
-                    return {
-                        'jail': 'nginx-http-auth',
-                        'currently_banned': banned_count
-                    }
+            match = re.search(r'Currently banned:\s+(\d+)', result.stdout)
+            if match:
+                return {'currently_banned': int(match.group(1))}
     except:
         pass
-    return {'jail': 'nginx-http-auth', 'currently_banned': 0}
+    return {'currently_banned': 0}
 
 def get_security_events():
     """Get security event count from alerts log"""
+    count = 0
     try:
-        alert_file = '/var/log/nginx/security_alerts.log'
-        if not os.path.exists(alert_file):
-            return {'event_count': 0}
-
-        now = datetime.now()
-        one_day_ago = now - timedelta(days=1)
-
-        event_count = 0
-        with open(alert_file, 'r') as f:
-            for line in f:
-                try:
-                    timestamp_str = line.split(')')[0].split('(')[1]
-                    timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
-                    if timestamp > one_day_ago:
-                        event_count += 1
-                except:
-                    continue
-
-        return {'event_count': event_count}
+        if os.path.exists(ALERTS_LOG):
+            with open(ALERTS_LOG, 'r') as f:
+                count = sum(1 for line in f)
     except:
-        return {'event_count': 0}
+        pass
+    return {'event_count': count}
+
+def get_request_trends():
+    """Get request counts per minute for the last 60 minutes"""
+    labels = []
+    values = []
+    try:
+        if os.path.exists(ACCESS_LOG):
+            # Read from the end of the file
+            with open(ACCESS_LOG, 'rb') as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                offset = min(size, 2048 * 1024) # 2MB
+                f.seek(size - offset)
+                lines = f.read().decode('utf-8', errors='ignore').splitlines()
+            
+            counts = Counter()
+            latest_ts = None
+            
+            for line in reversed(lines):
+                try:
+                    match = re.search(r'\[(\d{2}/[A-Z][a-z]{2}/\d{4}:\d{2}:\d{2}:\d{2})', line)
+                    if match:
+                        ts_str = match.group(1)
+                        ts = datetime.strptime(ts_str, '%d/%b/%Y:%H:%M:%S')
+                        if not latest_ts: latest_ts = ts
+                        counts[ts.strftime('%H:%M')] += 1
+                except: continue
+            
+            if not latest_ts:
+                latest_ts = datetime.now()
+
+            for i in range(59, -1, -1):
+                t = (latest_ts - timedelta(minutes=i)).strftime('%H:%M')
+                labels.append(t)
+                values.append(counts.get(t, 0))
+    except Exception as e:
+        print(f"Error in request trends: {e}")
+    return {'labels': labels, 'values': values}
+
+def get_status_distribution():
+    """Aggregate HTTP status codes"""
+    dist = Counter({'2xx': 0, '3xx': 0, '4xx': 0, '5xx': 0, 'Others': 0})
+    try:
+        lines = get_last_lines(ACCESS_LOG, 5000)
+        
+        for line in lines:
+            try:
+                # Robust parsing: split by quotes and get first item of 3rd segment
+                parts = line.split('"')
+                if len(parts) >= 3:
+                    status_part = parts[2].strip().split()[0]
+                    if status_part.startswith('2'): dist['2xx'] += 1
+                    elif status_part.startswith('3'): dist['3xx'] += 1
+                    elif status_part.startswith('4'): dist['4xx'] += 1
+                    elif status_part.startswith('5'): dist['5xx'] += 1
+                    else: dist['Others'] += 1
+            except: continue
+    except:
+        pass
+    return dict(dist)
+
+def get_security_data():
+    """Identify top suspicious IP addresses and categorize threats"""
+    ips = Counter()
+    threats = Counter()
+    total_detections = 0
+    
+    # Categories mapping
+    patterns = {
+        'SQL Injection': re.compile(r'(union\s+select|select\s+.*\s+from|insert\s+into)', re.I),
+        'XSS/Injection': re.compile(r'(script|<|%3c|%3e|>)', re.I),
+        'Path Traversal': re.compile(r'(etc/passwd|/etc/|../|boot\.ini)', re.I),
+        'Brute Force/Admin': re.compile(r'(wp-login|admin\.php|login\.php|wp-admin|xmlrpc)', re.I),
+        'Exploit/Execution': re.compile(r'(cgi-bin|mindex|shell|cmd\.exe|powershell|\$\{)', re.I),
+        'Scan/Probing': re.compile(r'(\.env|\.git|config|phpinfo|\.aws|\.ssh)', re.I)
+    }
+
+    try:
+        # 1. Check dedicated alerts log (usually Fail2ban or ModSec)
+        if os.path.exists(ALERTS_LOG) and os.path.getsize(ALERTS_LOG) > 0:
+            with open(ALERTS_LOG, 'r') as f:
+                for line in f:
+                    total_detections += 1
+                    threats['Alert Log Entry'] += 1
+                    match = re.search(r'(\d{1,3}\.){3}\d{1,3}', line)
+                    if match: ips[match.group(0)] += 1
+        
+        # 2. Hybrid: Scan access log for common patterns
+        if os.path.exists(ACCESS_LOG):
+            lines = get_last_lines(ACCESS_LOG, 2000)
+            for line in lines:
+                matched_any = False
+                for name, prog in patterns.items():
+                    if prog.search(line):
+                        total_detections += 1
+                        threats[name] += 1
+                        matched_any = True
+                
+                if matched_any:
+                    match = re.match(r'^(\d{1,3}\.){3}\d{1,3}', line)
+                    if match: ips[match.group(0)] += 1
+    except: pass
+    
+    return {
+        'total_detections': total_detections,
+        'threat_breakdown': dict(threats),
+        'top_attacks': [{'ip': ip, 'count': count} for ip, count in ips.most_common(5)]
+    }
 
 @app.route('/api/metrics')
 def metrics():
     """Return all metrics"""
+    security = get_security_data()
     return jsonify({
         'nginx_status': get_nginx_status(),
-        'fail2ban_status': get_fail2ban_status()
+        'fail2ban_status': get_fail2ban_status(),
+        'security_events': security,
+        'request_trends': get_request_trends(),
+        'status_distribution': get_status_distribution(),
+        'top_attacks': security['top_attacks']
     })
 
-@app.route('/api/security-events')
-def security_events():
-    """Return security events count"""
-    return jsonify(get_security_events())
-
 if __name__ == '__main__':
-    app.run(host='127.0.0.1', port=8081, debug=False)
+    app.run(host='0.0.0.0', port=8081, debug=False)
 EOF
 
     chmod +x /opt/nginx/scripts/metrics_server.py
@@ -978,6 +1191,49 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 EOF
+
+    # Add port mapping to Docker Compose if not already present
+    local RESTART_NEEDED=false
+    if [[ -f /opt/nginx/docker-compose.yml ]]; then
+        if ! grep -q "8080:8082" /opt/nginx/docker-compose.yml; then
+            print_info "Patching /opt/nginx/docker-compose.yml with port 8080..."
+            # Add port 8080:8082 mapping after the 443 mapping
+            sed -i '/"443:8443"/a \      - "8080:8082"' /opt/nginx/docker-compose.yml
+            RESTART_NEEDED=true
+        fi
+        if ! grep -q "./dashboard:/opt/nginx/dashboard:ro" /opt/nginx/docker-compose.yml; then
+            print_info "Patching /opt/nginx/docker-compose.yml with dashboard volume..."
+            # Add dashboard volume after html volume
+            sed -i '/.\/html:\/usr\/share\/nginx\/html:ro/a \      - ./dashboard:/opt/nginx/dashboard:ro' /opt/nginx/docker-compose.yml
+            RESTART_NEEDED=true
+        fi
+        
+        if [[ "$RESTART_NEEDED" == "true" ]]; then
+            # Restart container to apply changes
+            print_info "Restarting Nginx container to apply configuration changes..."
+            (cd /opt/nginx && run_docker_compose up -d --build)
+        else
+            print_info "Nginx container configuration is up to date."
+        fi
+    fi
+
+    # Ensure SSH TCP Forwarding is enabled for tunneling
+    print_info "Ensuring SSH TCP Forwarding is enabled..."
+    local ssh_conf="/etc/ssh/sshd_config.d/99-hardening.conf"
+    if [[ -f "$ssh_conf" ]]; then
+        if grep -q "AllowTcpForwarding no" "$ssh_conf"; then
+            print_info "Enabling AllowTcpForwarding in $ssh_conf..."
+            sed -i 's/AllowTcpForwarding no/AllowTcpForwarding yes/' "$ssh_conf"
+            
+            # Reload SSH service
+            if systemctl is-active --quiet ssh.socket; then
+                systemctl reload ssh.service 2>/dev/null || true
+            else
+                systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+            fi
+            print_success "SSH TCP Forwarding enabled and service reloaded."
+        fi
+    fi
 
     # Install Python3 and Flask on host system if not present
     # The Flask API runs as a separate systemd service on the host to:
@@ -1035,14 +1291,67 @@ EOF
         fi
     fi
 
+    # Detect variables for instructions if not already set
+    local display_port="${SSH_PORT}"
+    if [[ -z "$display_port" ]]; then
+        if command -v ss >/dev/null 2>&1; then
+            display_port=$(ss -tlpn 2>/dev/null | grep sshd | head -n 1 | grep -o ':[0-9]*' | sed 's/://' | head -n 1 || echo "")
+        fi
+        if [[ -z "$display_port" ]] && [[ -f /etc/ssh/sshd_config ]]; then
+            display_port=$(grep -E "^Port\s+[0-9]+" /etc/ssh/sshd_config | grep -oP "\d+" | head -n 1 || echo "")
+        fi
+        display_port=${display_port:-22}
+    fi
+
+    local display_ip="${SERVER_IP_V4}"
+    if [[ -z "$display_ip" || "$display_ip" == "unknown" ]]; then
+        display_ip=$(curl -4 -s --connect-timeout 2 https://ifconfig.me 2>/dev/null || echo "your-server-ip")
+    fi
+
+    local display_user="${USERNAME}"
+    if [[ -z "$display_user" ]]; then
+        display_user=${SUDO_USER:-$(whoami)}
+    fi
+
+    local display_auth_keys_path
+    if [[ "$display_user" == "root" ]]; then
+        display_auth_keys_path="/root/.ssh/authorized_keys"
+    else
+        display_auth_keys_path="/home/${display_user}/.ssh/authorized_keys"
+    fi
+
     # Enable and start the service (with error handling)
     if systemctl daemon-reload 2>/dev/null; then
         if systemctl enable nginx-metrics-api 2>/dev/null; then
-            if systemctl start nginx-metrics-api 2>/dev/null; then
+            if systemctl restart nginx-metrics-api 2>/dev/null; then
                 print_success "Security dashboard created."
                 print_info "Dashboard URL: http://localhost:8080"
                 print_info "Metrics API: http://localhost:8081"
-                print_info "Access restricted to localhost only for security."
+                print_info "Access is restricted to localhost only for security."
+                
+                print_section "How to Access the Dashboard"
+                print_info "1. FROM SERVER TERMINAL (Text-only):"
+                print_info "   curl http://localhost:8080"
+                echo
+                print_info "2. FROM YOUR LOCAL COMPUTER (Web Browser):"
+                print_info "   Use an SSH tunnel to securely view the graphical dashboard."
+                print_info "   (Note: If using PowerShell, you may need to specify your private key with -i)"
+                echo
+                print_info "   ssh -L 8080:localhost:8080 -L 8081:localhost:8081 -p ${display_port} -i <path_to_private_key> ${display_user}@${display_ip}"
+                print_info "   Example: ssh -L 8080:localhost:8080 -L 8081:localhost:8081 -p ${display_port} -i C:\\Users\\Name\\.ssh\\id_rsa ${display_user}@${display_ip}"
+                print_info "   Then open in your local browser: http://localhost:8080"
+                echo
+                print_info "TROUBLESHOOTING SSH (Permission Denied):"
+                print_info "   - If you use PuTTY, it uses .ppk files. PowerShell's 'ssh' needs an OpenSSH key."
+                print_info "   - Ensure your local public key is added to this file on the server."
+                print_info "     ${display_auth_keys_path}"
+                print_info "   - If Windows says 'UNPROTECTED PRIVATE KEY FILE', use the icacls commands provided."
+                print_info "     icacls \"C:\\path\\to\\key\" /inheritance:r"
+                print_info "     icacls \"C:\\path\\to\\key\" /grant:r \"\$(\$env:USERNAME):R\""
+                print_info "   - Use the -i flag in PowerShell to point exactly to your private key file."
+                print_info "   - If the tunnel fails with 'administratively prohibited', ensure that"
+                print_info "     'AllowTcpForwarding yes' is set in /etc/ssh/sshd_config.d/99-hardening.conf"
+                print_info "     (The script now handles this automatically on reruns)."
             else
                 print_warning "Failed to start nginx-metrics-api service"
             fi
@@ -1051,6 +1360,17 @@ EOF
         fi
     else
         print_warning "Failed to reload systemd daemon"
+    fi
+
+    # Automate firewall configuration for Docker-to-Host API access
+    if command -v ufw >/dev/null 2>&1; then
+        print_info "Configuring firewall for Docker-to-Host API communication..."
+        if ! ufw status | grep -q "8081.*docker0"; then
+            ufw allow in on docker0 to any port 8081 comment 'Allow Nginx container to host API' >/dev/null 2>&1
+            print_success "Firewall rule added: Allow 8081 on docker0"
+        else
+            print_info "Firewall rule for port 8081 on docker0 already exists."
+        fi
     fi
 
     # Log completion (with error handling)
@@ -1185,8 +1505,11 @@ EOF
     cat > /etc/systemd/system/nginx-perf-monitor.service << 'EOF'
 [Unit]
 Description=Nginx Performance Monitor
+After=network.target
+
+# Optional dependency on Docker if using containerized Nginx
+Wants=docker.service
 After=docker.service
-Requires=docker.service
 
 [Service]
 Type=simple
@@ -1206,7 +1529,8 @@ EOF
     systemctl enable nginx-perf-monitor
     systemctl start nginx-perf-monitor
 
-    print_success "Performance monitoring started."
+    print_success "Performance monitoring agent (host-based) started."
+    print_info "This agent monitors both host-based and Docker Nginx instances."
     print_info "Performance logs: /var/log/nginx/performance.log"
     print_info "Service status: systemctl status nginx-perf-monitor"
     log "Nginx performance monitoring setup completed" 2>/dev/null || true
