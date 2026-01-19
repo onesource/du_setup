@@ -10,6 +10,15 @@ SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]}")"
 source "$SCRIPT_DIR/../lib/config.sh"
 source "$SCRIPT_DIR/../lib/utils.sh"
 
+# ============================================================================
+# Secure Temporary Directory Setup
+# ============================================================================
+
+# Create secure temporary directory for Python scripts
+NGINX_SCRIPTS_TEMP="/opt/nginx/scripts/temp"
+mkdir -p "$NGINX_SCRIPTS_TEMP"
+chmod 700 "$NGINX_SCRIPTS_TEMP"
+
 # --- Vulnerability Management Function ---
 manage_vulnerabilities() {
     print_section "Nginx Vulnerability Management"
@@ -507,7 +516,8 @@ check_cves() {
         echo
 
         # Create enhanced CVE check script with proper NVD API v2.0
-        cat > /tmp/cve_check.py << 'EOF'
+        local script_path="$NGINX_SCRIPTS_TEMP/cve_check_$$.py"
+        cat > "$script_path" << 'EOF'
 #!/usr/bin/env python3
 import requests
 import sys
@@ -703,11 +713,11 @@ if __name__ == '__main__':
 EOF
 
         if command -v python3 >/dev/null 2>&1; then
-            python3 /tmp/cve_check.py "$nginx_version" 2>&1 || echo "CVE check encountered an error"
+            python3 "$script_path" "$nginx_version" 2>&1 || echo "CVE check encountered an error"
         else
             echo "⚠ Python3 not available, skipping NVD/OSV CVE check"
         fi
-        rm -f /tmp/cve_check.py
+        rm -f "$script_path"
 
         echo
         echo
@@ -1292,7 +1302,8 @@ container_security_scan() {
         echo
 
         # Create Python script for NVD and OSV cross-check
-        cat > /tmp/container_vuln_check.py << 'EOF'
+        local script_path="$NGINX_SCRIPTS_TEMP/container_vuln_check_$$.py"
+        cat > "$script_path" << 'EOF'
 #!/usr/bin/env python3
 import requests
 import json
@@ -1411,11 +1422,11 @@ EOF
         local package_versions=$(get_container_package_versions "$nginx_container")
 
         if command -v python3 >/dev/null 2>&1; then
-            python3 /tmp/container_vuln_check.py "$package_versions" 2>&1 || echo "Cross-check encountered an error"
+            python3 "$script_path" "$package_versions" 2>&1 || echo "Cross-check encountered an error"
         else
             echo "⚠ Python3 not available, skipping database cross-check"
         fi
-        rm -f /tmp/container_vuln_check.py
+        rm -f "$script_path"
 
         echo
         echo "=== Final Security Assessment ==="
@@ -1692,7 +1703,8 @@ check_nvd_database() {
 
     if [[ -n "$nginx_version" ]]; then
         # Create Python script for NVD check
-        cat > /tmp/nvd_check.py << 'PYEOF'
+        local script_path="$NGINX_SCRIPTS_TEMP/nvd_check_$$.py"
+        cat > "$script_path" << 'PYEOF'
 #!/usr/bin/env python3
 import requests
 import sys
@@ -1784,8 +1796,8 @@ if __name__ == '__main__':
 PYEOF
 
         if command -v python3 >/dev/null 2>&1; then
-            python3 /tmp/nvd_check.py "$nginx_version" 2>&1 | tee -a "$report_file" || log_message "NVD check encountered an error"
-            rm -f /tmp/nvd_check.py
+            python3 "$script_path" "$nginx_version" 2>&1 | tee -a "$report_file" || log_message "NVD check encountered an error"
+            rm -f "$script_path"
         else
             log_message "Python3 not available, skipping NVD check"
         fi
@@ -1803,7 +1815,8 @@ check_osv_database() {
     local report_file="$REPORT_DIR/osv_check_$(date +%Y%m%d_%H%M%S).txt"
 
     # Create Python script for OSV check
-    cat > /tmp/osv_check.py << 'PYEOF'
+    local script_path="$NGINX_SCRIPTS_TEMP/osv_check_$$.py"
+    cat > "$script_path" << 'PYEOF'
 #!/usr/bin/env python3
 import requests
 import sys
@@ -1892,8 +1905,8 @@ PYEOF
     fi
 
     if command -v python3 >/dev/null 2>&1; then
-        python3 /tmp/osv_check.py "$package_versions_json" 2>&1 | tee -a "$report_file" || log_message "OSV check encountered an error"
-        rm -f /tmp/osv_check.py
+        python3 "$script_path" "$package_versions_json" 2>&1 | tee -a "$report_file" || log_message "OSV check encountered an error"
+        rm -f "$script_path"
     else
         log_message "Python3 not available, skipping OSV check"
     fi
