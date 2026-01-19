@@ -8,6 +8,8 @@
 # shellcheck disable=SC2034  # Variables are used in other modules that source this file
 
 # --- Admin Info ---
+# Default email address for notifications (can be changed in the menu)
+# admin@example.com
 ADMIN_EMAIL="admin@example.com"
 
 # --- Update Configuration ---
@@ -107,6 +109,11 @@ MEM_THRESHOLD=90    # Default Memory usage 90%
 CONN_THRESHOLD=200  # Default Network connections 200
 PROC_THRESHOLD=300  # Default Processes 300
 DISK_THRESHOLD=90  # New: Disk usage %
+
+# Let's Encrypt Environment
+# Set to "staging" for testing to avoid rate limits.
+# Set to "production" for live certificates.
+LETSENCRYPT_ENVIRONMENT="staging"
 
 # --- Initialize Configuration ---
 init_config() {
