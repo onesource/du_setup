@@ -238,3 +238,17 @@ execute_command() {
         return $?
     fi
 }
+
+# --- Docker Compose Helper ---
+# Checks for 'docker compose' (v2) or 'docker-compose' (v1) and runs the command
+run_docker_compose() {
+    if docker compose version >/dev/null 2>&1; then
+        docker compose "$@"
+    elif command -v docker-compose >/dev/null 2>&1; then
+        docker-compose "$@"
+    else
+        print_error "'docker compose' (v2) or 'docker-compose' (v1) not found."
+        print_info "Please install one of them to manage the Nginx container."
+        return 1
+    fi
+}
