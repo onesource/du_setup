@@ -1,0 +1,22 @@
+# Normalize all files to LF in repo, checkout native line endings per platform
+* text=auto
+
+# Explicit line endings
+# PowerShell scripts (Windows)
+*.ps1 text eol=crlf
+# Batch scripts (Windows)   
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Shell scripts (Linux/WSL)
+*.sh  text eol=lf
+*.bash text eol=lf
+
+# Python always LF
+*.py  text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+
+# Treat notebooks as text to avoid CRLF confusion
+*.ipynb text eol=lf
