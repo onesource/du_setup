@@ -6,7 +6,9 @@
 # ============================================================================
 
 # Source dependencies
+# shellcheck disable=SC1091
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/config.sh"
+# shellcheck disable=SC1091
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/utils.sh"
 
 # --- Setup Nginx Monitoring ---
@@ -282,6 +284,7 @@ setup_fail2ban_nginx() {
 
     # Load configuration for Fail2ban settings
     if [[ -f /etc/nginx-monitoring.conf ]]; then
+        # shellcheck disable=SC1091
         source /etc/nginx-monitoring.conf
     fi
 
@@ -295,6 +298,7 @@ logpath = /var/log/nginx/error.log
 maxretry = 5
 bantime = 3600
 findtime = 600
+backend = auto
 
 [nginx-limit-req]
 enabled = true
@@ -303,6 +307,7 @@ logpath = /var/log/nginx/error.log
 maxretry = 15
 bantime = 600
 findtime = 300
+backend = auto
 
 [nginx-noscript]
 enabled = true
@@ -311,6 +316,7 @@ logpath = /var/log/nginx/access.log
 maxretry = 10
 bantime = 86400
 findtime = 600
+backend = auto
 
 [nginx-badbots]
 enabled = true
@@ -319,6 +325,7 @@ logpath = /var/log/nginx/access.log
 maxretry = 5
 bantime = 86400
 findtime = 600
+backend = auto
 
 [nginx-noproxy]
 enabled = true
@@ -327,6 +334,7 @@ logpath = /var/log/nginx/access.log
 maxretry = 5
 bantime = 86400
 findtime = 300
+backend = auto
 
 [nginx-scan]
 enabled = true
@@ -335,20 +343,21 @@ logpath = /var/log/nginx/access.log
 maxretry = 20
 bantime = 86400
 findtime = 3600
+backend = auto
 EOF
 
     # Create Nginx filter definitions
     cat > /etc/fail2ban/filter.d/nginx-http-auth.conf << 'EOF'
 [Definition]
-failregex = ^ \[error\] \d+#\d+: \*\d+ user .* was not found in ".*"$
-            ^ \[error\] \d+#\d+: \*\d+ no user/password was provided for basic authentication.*
-            ^ \[error\] \d+#\d+: user .*: password mismatch.*
+failregex = ^ \[error\] \d+#\d+: \*\d+ user .* was not found in ".*", client: <HOST>.*
+            ^ \[error\] \d+#\d+: \*\d+ no user/password was provided for basic authentication, client: <HOST>.*
+            ^ \[error\] \d+#\d+: user .*: password mismatch, client: <HOST>.*
 ignoreregex =
 EOF
 
     cat > /etc/fail2ban/filter.d/nginx-limit-req.conf << 'EOF'
 [Definition]
-failregex = limiting requests, excess: .* by zone .*, client: <HOST>
+failregex = ^ \[error\] \d+#\d+: \*\d+ limiting requests, excess: .* by zone .*, client: <HOST>.*
 ignoreregex =
 EOF
 
@@ -386,6 +395,7 @@ EOF
 
     # Add whitelisted IPs from configuration if provided
     if [[ -f /etc/nginx-monitoring.conf ]]; then
+        # shellcheck disable=SC1091
         source /etc/nginx-monitoring.conf
         if [[ -n "$WHITELISTED_IPS" ]]; then
             sed -i "s/^ignoreip =.*/ignoreip = 127.0.0.1\/8 ::1 $WHITELISTED_IPS/" /etc/fail2ban/jail.d/ignoreips.conf
@@ -396,7 +406,15 @@ EOF
     systemctl restart fail2ban
 
     print_success "Fail2ban configured for Nginx."
-    print_info "Jail status: fail2ban-client status nginx-http-auth"
+    print_info "Check Fail2ban status: sudo fail2ban-client status"
+    print_info "Jail Details: sudo fail2ban-client status nginx-http-auth"
+    print_info "Jail Details: sudo fail2ban-client status nginx-limit-req"
+    print_info "Jail Details: sudo fail2ban-client status nginx-noscript"
+    print_info "Jail Details: sudo fail2ban-client status nginx-badbots"
+    print_info "Jail Details: sudo fail2ban-client status nginx-noproxy"
+    print_info "Jail Details: sudo fail2ban-client status nginx-scan"
+    print_info "Jail Details: sudo fail2ban-client status sshd"
+    print_info "Jail Details: sudo fail2ban-client status ufw-probes"
     log "Fail2ban Nginx configuration completed" 2>/dev/null || true
 }
 
@@ -413,44 +431,47 @@ setup_log_rotation() {
 
     # Create logrotate configuration using printf for better reliability
     print_info "Creating logrotate configuration..."
-    printf '%s\n' '/var/log/nginx/*.log {' > /etc/logrotate.d/nginx
-    printf '%s\n' '    daily' >> /etc/logrotate.d/nginx
-    printf '%s\n' '    missingok' >> /etc/logrotate.d/nginx
-    printf '%s\n' '    rotate 30' >> /etc/logrotate.d/nginx
-    printf '%s\n' '    compress' >> /etc/logrotate.d/nginx
-    printf '%s\n' '    delaycompress' >> /etc/logrotate.d/nginx
-    printf '%s\n' '    notifempty' >> /etc/logrotate.d/nginx
-    printf '%s\n' '    create 0640 root adm' >> /etc/logrotate.d/nginx
-    printf '%s\n' '    sharedscripts' >> /etc/logrotate.d/nginx
-    printf '%s\n' '    postrotate' >> /etc/logrotate.d/nginx
-    printf '%s\n' '        if [ -f /var/run/nginx.pid ]; then' >> /etc/logrotate.d/nginx
-    printf '%s\n' '            kill -USR1 $(cat /var/run/nginx.pid) 2>/dev/null || true' >> /etc/logrotate.d/nginx
-    printf '%s\n' '        fi' >> /etc/logrotate.d/nginx
-    printf '%s\n' '        if systemctl is-active --quiet nginx 2>/dev/null; then' >> /etc/logrotate.d/nginx
-    printf '%s\n' '            systemctl reload nginx 2>/dev/null || true' >> /etc/logrotate.d/nginx
-    printf '%s\n' '        fi' >> /etc/logrotate.d/nginx
-    printf '%s\n' '    endscript' >> /etc/logrotate.d/nginx
-    printf '%s\n' '}' >> /etc/logrotate.d/nginx
-    printf '%s\n' '' >> /etc/logrotate.d/nginx
-    printf '%s\n' '/var/log/nginx/security_*.log {' >> /etc/logrotate.d/nginx
-    printf '%s\n' '    daily' >> /etc/logrotate.d/nginx
-    printf '%s\n' '    missingok' >> /etc/logrotate.d/nginx
-    printf '%s\n' '    rotate 90' >> /etc/logrotate.d/nginx
-    printf '%s\n' '    compress' >> /etc/logrotate.d/nginx
-    printf '%s\n' '    delaycompress' >> /etc/logrotate.d/nginx
-    printf '%s\n' '    notifempty' >> /etc/logrotate.d/nginx
-    printf '%s\n' '    create 0640 root adm' >> /etc/logrotate.d/nginx
-    printf '%s\n' '}' >> /etc/logrotate.d/nginx
-    printf '%s\n' '' >> /etc/logrotate.d/nginx
-    printf '%s\n' '/var/log/nginx/performance.log {' >> /etc/logrotate.d/nginx
-    printf '%s\n' '    daily' >> /etc/logrotate.d/nginx
-    printf '%s\n' '    missingok' >> /etc/logrotate.d/nginx
-    printf '%s\n' '    rotate 30' >> /etc/logrotate.d/nginx
-    printf '%s\n' '    compress' >> /etc/logrotate.d/nginx
-    printf '%s\n' '    delaycompress' >> /etc/logrotate.d/nginx
-    printf '%s\n' '    notifempty' >> /etc/logrotate.d/nginx
-    printf '%s\n' '    create 0640 root adm' >> /etc/logrotate.d/nginx
-    printf '%s\n' '}' >> /etc/logrotate.d/nginx
+    {
+        printf '%s\n' '/var/log/nginx/*.log {'
+        printf '%s\n' '    daily'
+        printf '%s\n' '    missingok'
+        printf '%s\n' '    rotate 30'
+        printf '%s\n' '    compress'
+        printf '%s\n' '    delaycompress'
+        printf '%s\n' '    notifempty'
+        printf '%s\n' '    create 0640 root adm'
+        printf '%s\n' '    sharedscripts'
+        printf '%s\n' '    postrotate'
+        printf '%s\n' '        if [ -f /var/run/nginx.pid ]; then'
+        # shellcheck disable=SC2016
+        printf '%s\n' '            kill -USR1 $(cat /var/run/nginx.pid) 2>/dev/null || true'
+        printf '%s\n' '        fi'
+        printf '%s\n' '        if systemctl is-active --quiet nginx 2>/dev/null; then'
+        printf '%s\n' '            systemctl reload nginx 2>/dev/null || true'
+        printf '%s\n' '        fi'
+        printf '%s\n' '    endscript'
+        printf '%s\n' '}'
+        printf '%s\n' ''
+        printf '%s\n' '/var/log/nginx/security_*.log {'
+        printf '%s\n' '    daily'
+        printf '%s\n' '    missingok'
+        printf '%s\n' '    rotate 90'
+        printf '%s\n' '    compress'
+        printf '%s\n' '    delaycompress'
+        printf '%s\n' '    notifempty'
+        printf '%s\n' '    create 0640 root adm'
+        printf '%s\n' '}'
+        printf '%s\n' ''
+        printf '%s\n' '/var/log/nginx/performance.log {'
+        printf '%s\n' '    daily'
+        printf '%s\n' '    missingok'
+        printf '%s\n' '    rotate 30'
+        printf '%s\n' '    compress'
+        printf '%s\n' '    delaycompress'
+        printf '%s\n' '    notifempty'
+        printf '%s\n' '    create 0640 root adm'
+        printf '%s\n' '}'
+    } > /etc/logrotate.d/nginx
 
     if [ ! -f /etc/logrotate.d/nginx ]; then
         print_error "Failed to create logrotate configuration file"
@@ -538,6 +559,12 @@ setup_security_dashboard() {
         .status-warning { color: #f39c12; }
         .status-danger { color: #e74c3c; }
         .refresh { position: fixed; top: 20px; right: 20px; background: #3498db; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; }
+        .vuln-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.9em; }
+        .vuln-table th, .vuln-table td { text-align: left; padding: 12px; border-bottom: 1px solid #eee; }
+        .vuln-table th { background: #f8f9fa; color: #2c3e50; }
+        .severity-critical { color: #e74c3c; font-weight: bold; }
+        .severity-high { color: #e67e22; font-weight: bold; }
+        .hardening-status { font-size: 0.8em; margin-top: 5px; }
     </style>
 </head>
 <body>
@@ -551,25 +578,68 @@ setup_security_dashboard() {
 
         <div class="metrics">
             <div class="metric">
-                <h3>Direct Connections</h3>
+                <h3>Active Connections</h3>
                 <div class="metric-value" id="active-connections">-</div>
-                <small>Active TCP/HTTP streams</small>
+                <small>TCP/HTTP streams</small>
             </div>
             <div class="metric">
-                <h3>Unique Visitors (1h)</h3>
+                <h3>Unique Visitors</h3>
                 <div class="metric-value" id="unique-visitors">-</div>
-                <small>Distinct IP addresses</small>
+                <small>Last hour</small>
             </div>
             <div class="metric">
                 <h3>Banned IPs</h3>
                 <div class="metric-value" id="banned-ips">-</div>
-                <small>Blocked by Fail2ban</small>
+                <small>Fail2ban total</small>
             </div>
             <div class="metric">
                 <h3>Security Alerts</h3>
-                <div class="metric-value" id="security-events">-</div>
-                <small>Suspicious patterns detected</small>
+                <div class="metric-value" id="security-alerts">-</div>
+                <small>Threat patterns</small>
             </div>
+            <div class="metric">
+                <h3>CPU Usage</h3>
+                <div class="metric-value" id="cpu-usage">-</div>
+                <small>Host/Docker</small>
+            </div>
+            <div class="metric">
+                <h3>Memory Usage</h3>
+                <div class="metric-value" id="mem-usage">-</div>
+                <small>RAM allocation</small>
+            </div>
+            <div class="metric">
+                <h3>Response Time</h3>
+                <div class="metric-value" id="resp-time">-</div>
+                <small>Health status</small>
+            </div>
+            <div class="metric">
+                <h3>Error Rate</h3>
+                <div class="metric-value" id="error-rate">-</div>
+                <small>Avg 4xx/5xx %</small>
+            </div>
+            <div class="metric">
+                <h3>SSL Status</h3>
+                <div class="metric-value" id="ssl-status" style="font-size: 1.2em;">-</div>
+                <small id="ssl-expiry-days">Checking cert...</small>
+            </div>
+            <div class="metric">
+                <h3>Vulnerabilities</h3>
+                <div class="metric-value" id="cve-count">-</div>
+                <small id="cve-critical-high">CRITICAL / HIGH</small>
+            </div>
+            <div class="metric">
+                <h3>Hardening</h3>
+                <div class="hardening-status" id="hardening-list">
+                    <div>Read-Only FS: <span id="h-readonly">-</span></div>
+                    <div>CPU Limit: <span id="h-cpulimit">-</span></div>
+                </div>
+                <small>Scan Date: <span id="last-scan-date">-</span></small>
+            </div>
+        </div>
+
+        <div class="chart-container">
+            <h3>Performance Trends (Last Hour)</h3>
+            <canvas id="perfChart"></canvas>
         </div>
 
         <div class="chart-container">
@@ -580,6 +650,24 @@ setup_security_dashboard() {
         <div class="chart-container">
             <h3>HTTP Status Codes</h3>
             <canvas id="statusChart"></canvas>
+        </div>
+
+        <div class="chart-container" style="max-height: none;">
+            <h3>Critical & High Vulnerabilities</h3>
+            <table class="vuln-table">
+                <thead>
+                    <tr>
+                        <th>CVE ID</th>
+                        <th>Package</th>
+                        <th>Severity</th>
+                        <th>Fixed In</th>
+                        <th>Issue</th>
+                    </tr>
+                </thead>
+                <tbody id="vuln-list">
+                    <tr><td colspan="5" style="text-align:center; color:#999;">No scan data available yet. Run a vulnerability scan to see results.</td></tr>
+                </tbody>
+            </table>
         </div>
 
         <div class="chart-container">
@@ -610,11 +698,23 @@ setup_security_dashboard() {
                 console.log("Data received:", data);
 
                 // Update summary metrics
+                if (data.performance) {
+                    document.getElementById('cpu-usage').textContent = data.performance.cpu + '%';
+                    document.getElementById('mem-usage').textContent = data.performance.mem + '%';
+                    document.getElementById('resp-time').textContent = data.performance.response_time + 's';
+                    document.getElementById('error-rate').textContent = data.performance.error_rate + '%';
+                }
+
                 if (data.nginx_status) {
-                    document.getElementById('active-connections').textContent = 
-                        data.nginx_status.active_connections || '0';
-                    document.getElementById('unique-visitors').textContent = 
-                        data.nginx_status.unique_visitors || '0';
+                    document.getElementById('active-connections').textContent = data.nginx_status.active_connections || '0';
+                    document.getElementById('unique-visitors').textContent = data.nginx_status.unique_visitors || '0';
+                }
+
+                if (data.performance && data.performance.history && perfChart) {
+                    perfChart.data.labels = data.performance.history.labels;
+                    perfChart.data.datasets[0].data = data.performance.history.cpu;
+                    perfChart.data.datasets[1].data = data.performance.history.mem;
+                    perfChart.update();
                 }
 
                 if (data.fail2ban_status) {
@@ -623,7 +723,7 @@ setup_security_dashboard() {
                 }
 
                 if (data.security_events) {
-                    document.getElementById('security-events').textContent = 
+                    document.getElementById('security-alerts').textContent = 
                         data.security_events.total_detections || '0';
                 }
 
@@ -684,6 +784,37 @@ setup_security_dashboard() {
                     attackChart.update();
                 }
 
+                // Update Scanner Data
+                if (data.scanner_data) {
+                    const sd = data.scanner_data;
+                    document.getElementById('last-scan-date').textContent = sd.last_scan;
+                    document.getElementById('ssl-status').textContent = sd.ssl_status;
+                    
+                    const cveValue = `${sd.cve_summary.critical + sd.cve_summary.high}`;
+                    document.getElementById('cve-count').textContent = cveValue;
+                    document.getElementById('cve-count').className = 'metric-value ' + (sd.cve_summary.critical > 0 ? 'status-danger' : (sd.cve_summary.high > 0 ? 'status-warning' : 'status-good'));
+                    document.getElementById('cve-critical-high').textContent = `${sd.cve_summary.critical} Critical / ${sd.cve_summary.high} High`;
+
+                    document.getElementById('h-readonly').textContent = sd.hardening.read_only;
+                    document.getElementById('h-cpulimit').textContent = sd.hardening.cpu_limit;
+
+                    // Vulnerability List
+                    const vulnList = document.getElementById('vuln-list');
+                    if (sd.vulnerabilities && sd.vulnerabilities.length > 0) {
+                        vulnList.innerHTML = sd.vulnerabilities.map(v => `
+                            <tr>
+                                <td><a href="https://nvd.nist.gov/vuln/detail/${v.id}" target="_blank" style="color:#3498db;text-decoration:none;">${v.id}</a></td>
+                                <td>${v.package}</td>
+                                <td class="severity-${v.severity.toLowerCase()}">${v.severity}</td>
+                                <td>${v.fixed_version}</td>
+                                <td title="${v.title}">${v.title.length > 50 ? v.title.substring(0, 50) + '...' : v.title}</td>
+                            </tr>
+                        `).join('');
+                    } else if (sd.last_scan !== 'Never') {
+                        vulnList.innerHTML = '<tr><td colspan="5" style="text-align:center; color:#27ae60;">✓ No high-severity vulnerabilities found in the latest scan!</td></tr>';
+                    }
+                }
+
             } catch (error) {
                 console.error('Error fetching metrics:', error);
             }
@@ -697,6 +828,37 @@ setup_security_dashboard() {
             }
 
             try {
+                // Performance trends chart
+                const perfCtx = document.getElementById('perfChart').getContext('2d');
+                perfChart = new Chart(perfCtx, {
+                    type: 'line',
+                    data: {
+                        labels: [],
+                        datasets: [
+                            {
+                                label: 'CPU %',
+                                data: [],
+                                borderColor: '#e67e22',
+                                backgroundColor: 'transparent',
+                                tension: 0.3
+                            },
+                            {
+                                label: 'MEM %',
+                                data: [],
+                                borderColor: '#9b59b6',
+                                backgroundColor: 'transparent',
+                                tension: 0.3
+                            }
+                        ]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: { y: { beginAtZero: true, suggestedMax: 10 } },
+                        animation: { duration: 0 }
+                    }
+                });
+
                 // Request trends chart
                 const requestCtx = document.getElementById('requestChart').getContext('2d');
                 requestChart = new Chart(requestCtx, {
@@ -714,6 +876,7 @@ setup_security_dashboard() {
                     },
                     options: {
                         responsive: true,
+                        maintainAspectRatio: false,
                         scales: { y: { beginAtZero: true } },
                         animation: { duration: 0 }
                     }
@@ -852,6 +1015,9 @@ def get_nginx_status():
             pass
 
         # Fallback to access log analysis
+        if not os.path.exists('/var/log/nginx/access.log'):
+            return {'active_connections': 0, 'total_requests': 0}
+            
         with open('/var/log/nginx/access.log', 'r') as f:
             lines = f.readlines()
 
@@ -880,22 +1046,34 @@ def get_nginx_status():
         return {'error': str(e)}
 
 def get_fail2ban_status():
-    """Get fail2ban statistics"""
+    """Get aggregate fail2ban statistics for all jails"""
+    total_banned = 0
+    active_jails = []
     try:
-        result = subprocess.run(['fail2ban-client', 'status', 'nginx-http-auth'],
+        # Get list of jails
+        result = subprocess.run(['fail2ban-client', 'status'],
                            capture_output=True, text=True, timeout=5)
         if result.returncode == 0:
-            lines = result.stdout.split('\n')
-            for line in lines:
-                if 'Currently banned:' in line:
-                    banned_count = int(line.split(':')[1].strip())
-                    return {
-                        'jail': 'nginx-http-auth',
-                        'currently_banned': banned_count
-                    }
-    except:
-        pass
-    return {'jail': 'nginx-http-auth', 'currently_banned': 0}
+            match = re.search(r'Jail list:\s+(.*)', result.stdout)
+            if match:
+                jails = [j.strip() for j in match.group(1).split(',')]
+                active_jails = jails
+                for jail in jails:
+                    res = subprocess.run(['fail2ban-client', 'status', jail],
+                                       capture_output=True, text=True, timeout=2)
+                    if res.returncode == 0:
+                        b_match = re.search(r'Currently banned:\s+(\d+)', res.stdout)
+                        if b_match:
+                            total_banned += int(b_match.group(1))
+        
+        return {
+            'currently_banned': total_banned,
+            'active_jails': active_jails
+        }
+    except Exception as e:
+        print(f"Error in fail2ban status: {e}")
+    return {'currently_banned': 0, 'active_jails': []}
+ burial_ground = []
 
 def get_security_events():
     """Get security event count from alerts log"""
@@ -944,6 +1122,8 @@ from flask import Flask, jsonify
 import subprocess
 import os
 import re
+import glob
+import json
 from datetime import datetime, timedelta
 from collections import Counter
 
@@ -1023,17 +1203,33 @@ def get_nginx_status():
     return status
 
 def get_fail2ban_status():
-    """Get fail2ban statistics"""
+    """Get aggregate fail2ban statistics for all jails"""
+    total_banned = 0
+    active_jails = []
     try:
-        result = subprocess.run(['fail2ban-client', 'status', 'nginx-http-auth'],
+        # Get list of jails
+        result = subprocess.run(['fail2ban-client', 'status'],
                            capture_output=True, text=True, timeout=5)
         if result.returncode == 0:
-            match = re.search(r'Currently banned:\s+(\d+)', result.stdout)
+            match = re.search(r'Jail list:\s+(.*)', result.stdout)
             if match:
-                return {'currently_banned': int(match.group(1))}
-    except:
-        pass
-    return {'currently_banned': 0}
+                jails = [j.strip() for j in match.group(1).split(',')]
+                active_jails = jails
+                for jail in jails:
+                    res = subprocess.run(['fail2ban-client', 'status', jail],
+                                       capture_output=True, text=True, timeout=2)
+                    if res.returncode == 0:
+                        b_match = re.search(r'Currently banned:\s+(\d+)', res.stdout)
+                        if b_match:
+                            total_banned += int(b_match.group(1))
+        
+        return {
+            'currently_banned': total_banned,
+            'active_jails': active_jails
+        }
+    except Exception as e:
+        print(f"Error in fail2ban status: {e}")
+    return {'currently_banned': 0, 'active_jails': []}
 
 def get_security_events():
     """Get security event count from alerts log"""
@@ -1083,6 +1279,45 @@ def get_request_trends():
     except Exception as e:
         print(f"Error in request trends: {e}")
     return {'labels': labels, 'values': values}
+
+def get_performance_data():
+    """Parse aggregated performance data from logs"""
+    perf = {
+        'cpu': '0.0', 'mem': '0.0', 'response_time': '0.000', 'error_rate': '0',
+        'history': {'labels': [], 'cpu': [], 'mem': [], 'response': []}
+    }
+    try:
+        lines = get_last_lines('/var/log/nginx/performance.log', 120) # Last hour (2 lines/min)
+        if lines:
+            # Get latest for summary
+            last = lines[-1]
+            # Format: Mon Jan 19 01:29:15 AM EST 2026: CPU=0.10%, MEM=1.43%, Response=0.000612s, Error_Rate=0%
+            cpu_m = re.search(r'CPU=([\d.]+)%', last)
+            mem_m = re.search(r'MEM=([\d.]+)%', last)
+            res_m = re.search(r'Response=([\d.]+)s', last)
+            err_m = re.search(r'Error_Rate=(\d+)%', last)
+            
+            if cpu_m: perf['cpu'] = cpu_m.group(1)
+            if mem_m: perf['mem'] = mem_m.group(1)
+            if res_m: perf['response_time'] = res_m.group(1)
+            if err_m: perf['error_rate'] = err_m.group(1)
+            
+            # History for charts
+            for line in lines:
+                try:
+                    ts_match = re.search(r'(\d{2}:\d{2}):\d{2}', line)
+                    c_m = re.search(r'CPU=([\d.]+)%', line)
+                    m_m = re.search(r'MEM=([\d.]+)%', line)
+                    r_m = re.search(r'Response=([\d.]+)s', line)
+                    
+                    if ts_match and c_m and m_m:
+                        perf['history']['labels'].append(ts_match.group(1))
+                        perf['history']['cpu'].append(float(c_m.group(1)))
+                        perf['history']['mem'].append(float(m_m.group(1)))
+                        perf['history']['response'].append(float(r_m.group(1)))
+                except: continue
+    except: pass
+    return perf
 
 def get_status_distribution():
     """Aggregate HTTP status codes"""
@@ -1154,6 +1389,78 @@ def get_security_data():
         'top_attacks': [{'ip': ip, 'count': count} for ip, count in ips.most_common(5)]
     }
 
+def get_scanner_data():
+    """Parse the most recent scanner and vulnerability reports"""
+    data = {
+        'last_scan': 'Never',
+        'ssl_status': 'Unknown',
+        'cve_summary': {'critical': 0, 'high': 0},
+        'vulnerabilities': [],
+        'hardening': {
+            'read_only': 'Unknown',
+            'cpu_limit': 'Unknown'
+        }
+    }
+    
+    report_dir = '/opt/nginx/security_reports'
+    if not os.path.exists(report_dir):
+        return data
+
+    try:
+        # 1. Parse latest auto_scan report
+        auto_reports = glob.glob(os.path.join(report_dir, 'auto_scan_*.txt'))
+        if auto_reports:
+            latest_auto = max(auto_reports, key=os.path.getmtime)
+            data['last_scan'] = datetime.fromtimestamp(os.path.getmtime(latest_auto)).strftime('%Y-%m-%d %H:%M')
+            
+            with open(latest_auto, 'r') as f:
+                content = f.read()
+                # Extract SSL
+                ssl_m = re.search(r'SSL certificate expiry: (.*)', content)
+                if ssl_m: data['ssl_status'] = ssl_m.group(1).strip()
+                
+                # Extract Hardening (if present in the report format)
+                if 'Read-only FS: ✓' in content: data['hardening']['read_only'] = '✓ Secure'
+                elif 'Read-only FS: ✗' in content: data['hardening']['read_only'] = '✗ Writable'
+                
+                cpu_m = re.search(r'CPU limit: (.*)', content)
+                if cpu_m: data['hardening']['cpu_limit'] = cpu_m.group(1).strip()
+
+        # 2. Parse latest Trivy JSON report
+        trivy_reports = glob.glob(os.path.join(report_dir, 'trivy_detailed_*.json'))
+        if trivy_reports:
+            latest_trivy = max(trivy_reports, key=os.path.getmtime)
+            with open(latest_trivy, 'r') as f:
+                trivy_data = json.load(f)
+                
+                vulnerabilities = []
+                critical_count = 0
+                high_count = 0
+                
+                results = trivy_data.get('Results', [])
+                for res in results:
+                    for vuln in res.get('Vulnerabilities', []):
+                        severity = vuln.get('Severity')
+                        if severity in ['CRITICAL', 'HIGH']:
+                            if severity == 'CRITICAL': critical_count += 1
+                            else: high_count += 1
+                            
+                            vulnerabilities.append({
+                                'id': vuln.get('VulnerabilityID'),
+                                'package': vuln.get('PkgName'),
+                                'severity': severity,
+                                'fixed_version': vuln.get('FixedVersion', 'N/A'),
+                                'title': vuln.get('Title', 'No description')
+                            })
+                
+                data['cve_summary'] = {'critical': critical_count, 'high': high_count}
+                # Limit to latest 10 vulnerabilities for UI performance
+                data['vulnerabilities'] = vulnerabilities[:10]
+    except Exception as e:
+        print(f"Error parsing scanner data: {e}")
+        
+    return data
+
 @app.route('/api/metrics')
 def metrics():
     """Return all metrics"""
@@ -1164,7 +1471,9 @@ def metrics():
         'security_events': security,
         'request_trends': get_request_trends(),
         'status_distribution': get_status_distribution(),
-        'top_attacks': security['top_attacks']
+        'performance': get_performance_data(),
+        'top_attacks': security['top_attacks'],
+        'scanner_data': get_scanner_data()
     })
 
 if __name__ == '__main__':
@@ -1417,9 +1726,9 @@ get_container_stats() {
             local mem=$(ps -p "$pid" -o %mem --no-headers | tr -d ' ')
             echo "${cpu}%\t${mem}%\t${mem}%"
         fi
-    elif docker ps --format "table {{.Names}}" 2>/dev/null | grep -q "^nginx$"; then
-        # Docker nginx
-        docker stats nginx --no-stream --format "table {{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}" | tail -n +2
+    elif docker ps --format "{{.Names}}" 2>/dev/null | grep -qx "nginx"; then
+        # Docker nginx - get CPU and MEM percent directly
+        docker stats nginx --no-stream --format "{{.CPUPerc}} {{.MemPerc}}"
     fi
 }
 
@@ -1468,8 +1777,8 @@ monitor_performance() {
         # Get container stats
         stats=$(get_container_stats)
         if [[ -n "$stats" ]]; then
-            cpu_percent=$(echo "$stats" | awk '{print $1}' | sed 's/%//')
-            memory_percent=$(echo "$stats" | awk '{print $3}' | sed 's/%//')
+            cpu_percent=$(echo "$stats" | awk '{print $1}' | tr -d '%')
+            memory_percent=$(echo "$stats" | awk '{print $2}' | tr -d '%')
 
             # Check CPU usage
             if [[ -n "$cpu_percent" ]] && (( $(echo "$cpu_percent > $CPU_THRESHOLD" | bc -l 2>/dev/null || echo "0") )); then
