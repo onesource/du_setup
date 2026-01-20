@@ -12,6 +12,11 @@
 # admin@example.com
 ADMIN_EMAIL="admin@example.com"
 
+# Let's Encrypt Environment
+# Set to "staging" for testing to avoid rate limits.
+# Set to "production" for live certificates.
+LETSENCRYPT_ENVIRONMENT="staging"
+
 # --- Update Configuration ---
 CURRENT_VERSION="0.74.2_modular"
 SCRIPT_URL="https://raw.githubusercontent.com/onesource/du_setup/refs/heads/main/du_setup_modular.sh"
@@ -109,11 +114,6 @@ MEM_THRESHOLD=90    # Default Memory usage 90%
 CONN_THRESHOLD=200  # Default Network connections 200
 PROC_THRESHOLD=300  # Default Processes 300
 DISK_THRESHOLD=90  # New: Disk usage %
-
-# Let's Encrypt Environment
-# Set to "staging" for testing to avoid rate limits.
-# Set to "production" for live certificates.
-LETSENCRYPT_ENVIRONMENT="staging"
 
 # --- Initialize Configuration ---
 init_config() {
