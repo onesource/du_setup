@@ -7,7 +7,9 @@
 
 # Source dependencies
 SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]}")"
+# shellcheck disable=SC1091
 source "$SCRIPT_DIR/../lib/config.sh"
+# shellcheck disable=SC1091
 source "$SCRIPT_DIR/../lib/utils.sh"
 
 # ============================================================================
@@ -72,7 +74,8 @@ run_security_scan() {
         print_error "Failed to create report directory: $report_dir"
         return 1
     }
-    local report_file="$report_dir/security_scan_$(date +%Y%m%d_%H%M%S).txt"
+    local report_file
+    report_file="$report_dir/security_scan_$(date +%Y%m%d_%H%M%S).txt"
 
     {
         echo "Nginx Security Scan Report"
@@ -91,7 +94,8 @@ run_security_scan() {
 
         # Try system nginx first
         if systemctl is-active --quiet nginx 2>/dev/null; then
-            local version_output=$(nginx -v 2>&1 || echo "")
+            local version_output
+            version_output=$(nginx -v 2>&1 || echo "")
             nginx_version=$(echo "$version_output" | sed -n 's/.*nginx\/\([0-9]*\.[0-9]*\.[0-9]*\).*/\1/p' || echo "N/A")
             if [[ "$nginx_version" != "N/A" ]] && [[ -n "$nginx_version" ]]; then
                 nginx_type="system"
@@ -100,13 +104,15 @@ run_security_scan() {
 
         # If system nginx not found, try Docker containers
         if [[ "$nginx_version" == "N/A" ]] || [[ -z "$nginx_version" ]]; then
-            local nginx_containers=$(docker ps -a --format "{{.Names}}\t{{.Status}}" 2>/dev/null | grep -i nginx || echo "")
+            local nginx_containers
+            nginx_containers=$(docker ps -a --format "{{.Names}}\t{{.Status}}" 2>/dev/null | grep -i nginx || echo "")
             if [[ -n "$nginx_containers" ]]; then
                 while IFS=$'\t' read -r container status; do
                     if [[ -n "$container" ]]; then
                         # Check if container is actually running (not restarting)
                         if [[ "$status" =~ "Up" ]]; then
-                            local version_output=$(docker exec "$container" nginx -v 2>&1 || echo "")
+                            local version_output
+                            version_output=$(docker exec "$container" nginx -v 2>&1 || echo "")
                             nginx_version=$(echo "$version_output" | sed -n 's/.*nginx\/\([0-9]*\.[0-9]*\.[0-9]*\).*/\1/p' || echo "N/A")
                             if [[ "$nginx_version" != "N/A" ]] && [[ -n "$nginx_version" ]]; then
                                 nginx_type="docker ($container)"
@@ -130,11 +136,20 @@ run_security_scan() {
         # SSL/TLS Configuration Check
         echo "SSL/TLS Configuration:"
         echo "---------------------"
+        local cert_file=""
         if [[ -f /opt/nginx/certs/cert.pem ]]; then
-            echo "Certificate found: /opt/nginx/certs/cert.pem"
+            cert_file="/opt/nginx/certs/cert.pem"
+        else
+            # Try to find any domain-specific certificate
+            cert_file=$(find /opt/nginx/certs/ -maxdepth 1 -name "*.pem" ! -name "cert.pem" | head -n 1)
+        fi
+
+        if [[ -n "$cert_file" ]] && [[ -f "$cert_file" ]]; then
+            echo "Certificate found: $cert_file"
 
             # Check certificate strength
-            local cert_info=$(openssl x509 -in /opt/nginx/certs/cert.pem -text -noout 2>/dev/null || echo "Error reading certificate")
+            local cert_info
+            cert_info=$(openssl x509 -in "$cert_file" -text -noout 2>/dev/null || echo "Error reading certificate")
             echo "Key Size: $(echo "$cert_info" | grep "Public-Key Algorithm" | cut -d: -f2 | tr -d ' ' || echo "N/A")"
             echo "Signature Algorithm: $(echo "$cert_info" | grep "Signature Algorithm" | head -1 | cut -d: -f2 | tr -d ' ' || echo "N/A")"
             echo "Expires: $(echo "$cert_info" | grep "Not After" | sed 's/.*Not After ://' || echo "N/A")"
@@ -147,7 +162,8 @@ run_security_scan() {
                 fi
             else
                 # Try Docker containers
-                local nginx_containers=$(docker ps --format "{{.Names}}" 2>/dev/null | grep -i nginx || echo "")
+                local nginx_containers
+                nginx_containers=$(docker ps --format "{{.Names}}" 2>/dev/null | grep -i nginx || echo "")
                 if [[ -n "$nginx_containers" ]]; then
                     while IFS= read -r container; do
                         if [[ -n "$container" ]]; then
@@ -177,17 +193,36 @@ run_security_scan() {
         local test_protocol="https"
         local test_host="localhost"
         local test_port="443"
+        local mock_domain="localhost"
 
-        # Check if HTTPS is available (use -k to ignore certificate hostname mismatch for localhost)
-        if ! curl -s -k -I "https://localhost:8443" >/dev/null 2>&1; then
-            test_protocol="http"
-            test_port="8080"
-            echo "Note: Testing HTTP (port 8080) - HSTS only works on HTTPS (port 8443)"
-        else
-            echo "Note: Testing HTTPS (port 8443) - Using -k flag to bypass certificate hostname verification for localhost"
+        # Try to detect domain for Host header
+        if [[ -n "$cert_file" ]]; then
+            mock_domain=$(basename "$cert_file" .pem)
+            [[ "$mock_domain" == "cert" ]] && mock_domain="localhost"
         fi
 
-        local http_headers=$(curl -s -k -I "${test_protocol}://${test_host}:${test_port}" 2>/dev/null || echo "")
+        # Robust port detection: Try common HTTPS ports first, then HTTP
+        if curl -s -k -I -L -H "Host: $mock_domain" "https://localhost:443" >/dev/null 2>&1; then
+            test_protocol="https"
+            test_port="443"
+            echo "Note: Testing HTTPS (port 443) - Using Host: $mock_domain"
+        elif curl -s -k -I -L -H "Host: $mock_domain" "https://localhost:8443" >/dev/null 2>&1; then
+            test_protocol="https"
+            test_port="8443"
+            echo "Note: Testing HTTPS (port 8443) - Using Host: $mock_domain"
+        elif curl -s -I -L -H "Host: $mock_domain" "http://localhost:80" >/dev/null 2>&1; then
+            test_protocol="http"
+            test_port="80"
+            echo "Note: Testing HTTP (port 80) - HSTS check will be skipped"
+        else
+            test_protocol="http"
+            test_port="8080"
+            echo "Note: Testing HTTP (port 8080) - HSTS check will be skipped"
+        fi
+
+        local http_headers
+        local curl_headers_cmd=(curl -s -k -I -L -H "Host: $mock_domain" "${test_protocol}://${test_host}:${test_port}")
+        http_headers=$("${curl_headers_cmd[@]}" 2>/dev/null || echo "")
         if echo "$http_headers" | grep -qi "x-frame-options"; then
             echo "X-Frame-Options: ✓"
         else
@@ -223,11 +258,12 @@ run_security_scan() {
         )
 
         for test_path in "${traversal_tests[@]}"; do
-            local curl_cmd="curl -s -o /dev/null -w \"%{http_code}\""
+            local curl_cmd=(curl -s -o /dev/null -w "%{http_code}" -L -H "Host: $mock_domain")
             if [[ "$test_protocol" == "https" ]]; then
-                curl_cmd="$curl_cmd -k"
+                curl_cmd+=(-k)
             fi
-            local response=$($curl_cmd "${test_protocol}://${test_host}:${test_port}$test_path" 2>/dev/null || echo "000")
+            local response
+            response=$("${curl_cmd[@]}" "${test_protocol}://${test_host}:${test_port}$test_path" 2>/dev/null || echo "000")
             if [[ "$response" == "200" ]]; then
                 echo "Directory traversal vulnerability detected: $test_path ✗"
             else
@@ -241,11 +277,12 @@ run_security_scan() {
         echo "---------------------"
 
         # SQL Injection test
-        local curl_cmd="curl -s -o /dev/null -w \"%{http_code}\""
+        local curl_sqli_cmd=(curl -s -o /dev/null -w "%{http_code}" -L -H "Host: $mock_domain")
         if [[ "$test_protocol" == "https" ]]; then
-            curl_cmd="$curl_cmd -k"
+            curl_sqli_cmd+=(-k)
         fi
-        local sqli_response=$($curl_cmd "${test_protocol}://${test_host}:${test_port}/?id=1' OR '1'='1" 2>/dev/null || echo "000")
+        local sqli_response
+        sqli_response=$("${curl_sqli_cmd[@]}" "${test_protocol}://${test_host}:${test_port}/?id=1' OR '1'='1" 2>/dev/null || echo "000")
         if [[ "$sqli_response" == "200" ]]; then
             echo "Potential SQL Injection vulnerability ✗"
         else
@@ -253,11 +290,14 @@ run_security_scan() {
         fi
 
         # XSS test
-        local curl_cmd="curl -s"
+        local xss_token
+        xss_token="SCANNER_XSS_TEST_TOKEN_$(date +%s)"
+        local curl_xss_cmd=(curl -s -L -H "Host: $mock_domain")
         if [[ "$test_protocol" == "https" ]]; then
-            curl_cmd="$curl_cmd -k"
+            curl_xss_cmd+=(-k)
         fi
-        local xss_response=$($curl_cmd "${test_protocol}://${test_host}:${test_port}/?search=<script>alert('xss')</script>" 2>/dev/null | grep -i "<script>" || echo "")
+        local xss_response
+        xss_response=$("${curl_xss_cmd[@]}" "${test_protocol}://${test_host}:${test_port}/?search=<script>alert('${xss_token}')</script>" 2>/dev/null | grep -i "${xss_token}" || echo "")
         if [[ -n "$xss_response" ]]; then
             echo "Potential XSS vulnerability ✗"
         else
@@ -265,13 +305,19 @@ run_security_scan() {
         fi
 
         # Information Disclosure Check
-        local curl_cmd="curl -s -I"
+        local curl_info_cmd=(curl -s -I -L -H "Host: $mock_domain")
         if [[ "$test_protocol" == "https" ]]; then
-            curl_cmd="$curl_cmd -k"
+            curl_info_cmd+=(-k)
         fi
-        local server_info=$($curl_cmd "${test_protocol}://${test_host}:${test_port}" 2>/dev/null | grep -i server || echo "")
+        local server_info
+        server_info=$("${curl_info_cmd[@]}" "${test_protocol}://${test_host}:${test_port}" 2>/dev/null | grep -i "^Server:" || echo "")
         if [[ -n "$server_info" ]]; then
-            echo "Server header disclosure: $server_info ✗"
+            # Check if version is disclosed (e.g., "nginx/1.29.3")
+            if echo "$server_info" | grep -q "/[0-9]"; then
+                echo "Server version disclosure: $server_info ✗"
+            else
+                echo "Server header disclosure: $server_info (Warning: Requires headers-more module to hide fully) ⚠"
+            fi
         else
             echo "Server header hidden ✓"
         fi
@@ -289,7 +335,8 @@ run_security_scan() {
             nginx_config=$(nginx -T 2>/dev/null || echo "")
         else
             # Try Docker containers
-            local nginx_containers=$(docker ps --format "{{.Names}}" 2>/dev/null | grep -i nginx || echo "")
+            local nginx_containers
+            nginx_containers=$(docker ps --format "{{.Names}}" 2>/dev/null | grep -i nginx || echo "")
             if [[ -n "$nginx_containers" ]]; then
                 while IFS= read -r container; do
                     if [[ -n "$container" ]]; then
@@ -310,7 +357,8 @@ run_security_scan() {
         if [[ "$rate_limiting_configured" == "true" ]]; then
             echo "Rate limiting configured: ✓"
             # Extract and display rate limiting settings
-            local rate_settings=$(echo "$nginx_config" | grep -E "limit_req_zone|limit_req" | head -5)
+            local rate_settings
+            rate_settings=$(echo "$nginx_config" | grep -E "limit_req_zone|limit_req" | head -5)
             if [[ -n "$rate_settings" ]]; then
                 echo "  Settings:"
                 echo "$rate_settings" \
@@ -335,11 +383,12 @@ run_security_scan() {
         )
 
         for file in "${sensitive_files[@]}"; do
-            local curl_cmd="curl -s -o /dev/null -w \"%{http_code}\""
+            local curl_file_cmd=(curl -s -o /dev/null -w "%{http_code}" -L -H "Host: $mock_domain")
             if [[ "$test_protocol" == "https" ]]; then
-                curl_cmd="$curl_cmd -k"
+                curl_file_cmd+=(-k)
             fi
-            local response=$($curl_cmd "${test_protocol}://${test_host}:${test_port}$file" 2>/dev/null || echo "000")
+            local response
+            response=$("${curl_file_cmd[@]}" "${test_protocol}://${test_host}:${test_port}$file" 2>/dev/null || echo "000")
             if [[ "$response" == "200" ]]; then
                 echo "Sensitive file accessible: $file ✗"
             else
@@ -379,7 +428,8 @@ check_cves() {
 
     # Try system nginx first
     if systemctl is-active --quiet nginx 2>/dev/null; then
-        local version_output=$(nginx -v 2>&1 || echo "")
+        local version_output
+        version_output=$(nginx -v 2>&1 || echo "")
         nginx_version=$(echo "$version_output" | sed -n 's/.*nginx\/\([0-9]*\.[0-9]*\.[0-9]*\).*/\1/p' || echo "")
         if [[ -n "$nginx_version" ]]; then
             nginx_type="system"
@@ -389,7 +439,8 @@ check_cves() {
     # If system nginx not found, try Docker containers
     if [[ -z "$nginx_version" ]]; then
         # Get list of containers that might be nginx (including restarting ones)
-        local nginx_containers=$(docker ps -a --format "{{.Names}}\t{{.Status}}\t{{.Image}}" 2>/dev/null | grep -i nginx || echo "")
+        local nginx_containers
+        nginx_containers=$(docker ps -a --format "{{.Names}}\t{{.Status}}\t{{.Image}}" 2>/dev/null | grep -i nginx || echo "")
 
         if [[ -n "$nginx_containers" ]]; then
             # Try each nginx container
@@ -398,7 +449,8 @@ check_cves() {
                     # Check if container is actually running (not restarting)
                     if [[ "$status" =~ "Up" ]]; then
                         # Try docker exec
-                        local version_output=$(docker exec "$container" nginx -v 2>&1 || echo "")
+                        local version_output
+                        version_output=$(docker exec "$container" nginx -v 2>&1 || echo "")
                         nginx_version=$(echo "$version_output" | sed -n 's/.*nginx\/\([0-9]*\.[0-9]*\.[0-9]*\).*/\1/p' || echo "")
                         if [[ -n "$nginx_version" ]]; then
                             nginx_type="docker ($container)"
@@ -438,7 +490,8 @@ check_cves() {
         print_error "Failed to create report directory: $report_dir"
         return 1
     }
-    local report_file="$report_dir/cve_report_$(date +%Y%m%d_%H%M%S).txt"
+    local report_file
+    report_file="$report_dir/cve_report_$(date +%Y%m%d_%H%M%S).txt"
 
     {
         echo "Nginx CVE Vulnerability Report"
@@ -476,25 +529,27 @@ check_cves() {
                 -v /var/run/docker.sock:/var/run/docker.sock \
                 -v "$report_dir":/output \
                 aquasec/trivy:latest \
-                $trivy_command \
+                "$trivy_command" \
                 "$trivy_target" \
                 --severity HIGH,CRITICAL \
                 --format table \
                 --no-progress \
-                --output /output/trivy_scan_$(date +%Y%m%d_%H%M%S).txt 2>&1 || echo "Trivy scan completed with warnings"
+                --output "/output/trivy_scan_$(date +%Y%m%d_%H%M%S).txt" 2>&1 || echo "Trivy scan completed with warnings"
 
             # Check if Trivy found vulnerabilities
-            local trivy_output=$(docker run --rm \
+            local trivy_output
+            trivy_output=$(docker run --rm \
                 -v /var/run/docker.sock:/var/run/docker.sock \
                 aquasec/trivy:latest \
-                $trivy_command \
+                "$trivy_command" \
                 "$trivy_target" \
                 --severity HIGH,CRITICAL \
                 --format json \
                 --no-progress 2>/dev/null || echo "{}")
 
             # Parse and display results
-            local vuln_count=$(echo "$trivy_output" | jq -r '.Results[].Vulnerabilities | length' 2>/dev/null | awk '{s+=$1} END {print s+0}')
+            local vuln_count
+            vuln_count=$(echo "$trivy_output" | jq -r '.Results[].Vulnerabilities | length' 2>/dev/null | awk '{s+=$1} END {print s+0}')
 
             if [[ "$vuln_count" -gt 0 ]]; then
                 echo "⚠ Found $vuln_count HIGH/CRITICAL vulnerabilities"
@@ -790,7 +845,8 @@ scan_configuration() {
         print_info "Detected system nginx installation"
     else
         # Try Docker containers
-        local nginx_container=$(docker ps --format "{{.Names}}" 2>/dev/null | grep -i nginx | head -1 || echo "")
+        local nginx_container
+        nginx_container=$(docker ps --format "{{.Names}}" 2>/dev/null | grep -i nginx | head -1 || echo "")
         if [[ -n "$nginx_container" ]]; then
             nginx_type="docker"
             # For Docker, check if configs are mounted from /opt/nginx
@@ -819,7 +875,8 @@ scan_configuration() {
         print_error "Failed to create report directory: $report_dir"
         return 1
     }
-    local report_file="$report_dir/config_scan_$(date +%Y%m%d_%H%M%S).txt"
+    local report_file
+    report_file="$report_dir/config_scan_$(date +%Y%m%d_%H%M%S).txt"
 
     {
         echo "Nginx Configuration Security Scan"
@@ -844,7 +901,8 @@ scan_configuration() {
             fi
         else
             # Try Docker containers
-            local nginx_containers=$(docker ps --format "{{.Names}}" 2>/dev/null | grep -i nginx || echo "")
+            local nginx_containers
+            nginx_containers=$(docker ps --format "{{.Names}}" 2>/dev/null | grep -i nginx || echo "")
             if [[ -n "$nginx_containers" ]]; then
                 while IFS= read -r container; do
                     if [[ -n "$container" ]]; then
@@ -915,7 +973,6 @@ scan_configuration() {
         echo "-------------------"
 
         # Hidden file protection (match ANY common patterns)
-        local hidden_file_found=false
         if grep -q "location.*~.*\\." "$config_file" 2>/dev/null || \
         [[ -d "$config_dir" ]] && grep -q "location.*~.*\\." "$config_dir"/*.conf 2>/dev/null; then
             echo "Hidden file protection: ✓"
@@ -924,7 +981,6 @@ scan_configuration() {
         fi
 
         # Backup file protection (match location blocks with common extensions)
-        local backup_file_found=false
         if grep -q "location.*\(bak\|backup\|old\)" "$config_file" 2>/dev/null || \
         [[ -d "$config_dir" ]] && grep -q "location.*\(bak\|backup\|old\)" "$config_dir"/*.conf 2>/dev/null; then
             echo "Backup file protection: ✓"
@@ -998,13 +1054,15 @@ get_container_package_versions() {
     fi
 
     # Get nginx version
-    local nginx_version=$(docker exec "$container" nginx -v 2>&1 | sed -n 's/.*nginx\/\([0-9]*\.[0-9]*\.[0-9]*\).*/\1/p' || echo "")
+    local nginx_version
+    nginx_version=$(docker exec "$container" nginx -v 2>&1 | sed -n 's/.*nginx\/\([0-9]*\.[0-9]*\.[0-9]*\).*/\1/p' || echo "")
     if [[ -n "$nginx_version" ]]; then
         versions_json=$(echo "$versions_json" | jq --arg v "$nginx_version" '.nginx = $v')
     fi
 
     # Get openssl version
-    local openssl_version=$(docker exec "$container" openssl version 2>&1 | sed -n 's/.*OpenSSL \([0-9]*\.[0-9]*\.[0-9]*\).*/\1/p' || echo "")
+    local openssl_version
+    openssl_version=$(docker exec "$container" openssl version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[a-z]?' | head -n 1 || echo "")
     if [[ -n "$openssl_version" ]]; then
         versions_json=$(echo "$versions_json" | jq --arg v "$openssl_version" '.openssl = $v')
     fi
@@ -1022,7 +1080,8 @@ container_security_scan() {
     print_info "Running container security scan..."
 
     # Check if Docker nginx is running or restarting
-    local nginx_container_info=$(docker ps -a --format "{{.Names}}\t{{.Status}}" 2>/dev/null | grep -i nginx | head -1 || echo "")
+    local nginx_container_info
+    nginx_container_info=$(docker ps -a --format "{{.Names}}\t{{.Status}}" 2>/dev/null | grep -i nginx | head -1 || echo "")
     local nginx_container=""
     local nginx_status=""
 
@@ -1053,7 +1112,8 @@ container_security_scan() {
                 print_error "Failed to create report directory: $report_dir"
                 return 1
             }
-            local report_file="$report_dir/system_scan_$(date +%Y%m%d_%H%M%S).txt"
+            local report_file
+            report_file="$report_dir/system_scan_$(date +%Y%m%d_%H%M%S).txt"
 
             {
                 echo "Nginx System Security Scan"
@@ -1069,7 +1129,7 @@ container_security_scan() {
 
                 echo "Process Information:"
                 echo "-------------------"
-                ps aux | grep nginx | grep -v grep || echo "No nginx processes found"
+                pgrep -l nginx || echo "No nginx processes found"
                 echo
 
                 echo "Configuration Files:"
@@ -1106,7 +1166,8 @@ container_security_scan() {
         print_error "Failed to create report directory: $report_dir"
         return 1
     }
-    local report_file="$report_dir/container_scan_$(date +%Y%m%d_%H%M%S).txt"
+    local report_file
+    report_file="$report_dir/container_scan_$(date +%Y%m%d_%H%M%S).txt"
 
     {
         echo "Nginx Container Security Scan"
@@ -1131,7 +1192,8 @@ container_security_scan() {
         echo "----------------"
 
         # Check if running as root
-        local user_id=$(docker exec "$nginx_container" id -u 2>/dev/null || echo "0")
+        local user_id
+        user_id=$(docker exec "$nginx_container" id -u 2>/dev/null || echo "0")
         if [[ "$user_id" == "0" ]]; then
             echo "Running as root: ✗ (Security risk)"
         else
@@ -1139,7 +1201,8 @@ container_security_scan() {
         fi
 
         # Check for privileged mode
-        local privileged=$(docker inspect "$nginx_container" 2>/dev/null | jq -r '.[0].Host.Privileged' 2>/dev/null || echo "false")
+        local privileged
+        privileged=$(docker inspect "$nginx_container" 2>/dev/null | jq -r '.[0].Host.Privileged' 2>/dev/null || echo "false")
         if [[ "$privileged" == "true" ]]; then
             echo "Privileged mode: ✗ (Security risk)"
         else
@@ -1155,7 +1218,8 @@ container_security_scan() {
         docker inspect "$nginx_container" 2>/dev/null | jq -r '.[0].HostSecurityOpt[]' 2>/dev/null || echo "No security options"
 
         # Check for read-only filesystem
-        local read_only=$(docker inspect "$nginx_container" 2>/dev/null | jq -r '.[0].HostConfig.ReadonlyRootfs' 2>/dev/null || echo "false")
+        local read_only
+        read_only=$(docker inspect "$nginx_container" 2>/dev/null | jq -r '.[0].HostConfig.ReadonlyRootfs' 2>/dev/null || echo "false")
         if [[ "$read_only" == "true" ]]; then
             echo "Read-only filesystem: ✓"
         else
@@ -1167,15 +1231,25 @@ container_security_scan() {
         echo "Resource Limits:"
         echo "---------------"
 
-        local memory_limit=$(docker inspect "$nginx_container" 2>/dev/null | jq -r '.[0].HostConfig.Memory' 2>/dev/null || echo "0")
+        local memory_limit
+        memory_limit=$(docker inspect "$nginx_container" 2>/dev/null | jq -r '.[0].HostConfig.Memory' 2>/dev/null || echo "0")
         if [[ "$memory_limit" != "0" ]]; then
             echo "Memory limit: ✓ ($(echo "$memory_limit" | awk '{print $1/1024/1024" MB"}'))"
         else
             echo "Memory limit: ✗ (Unlimited)"
         fi
 
-        local cpu_limit=$(docker inspect "$nginx_container" 2>/dev/null | jq -r '.[0].HostConfig.CpuShares' 2>/dev/null || echo "0")
-        if [[ "$cpu_limit" != "0" ]]; then
+        local cpu_limit
+        local nano_cpus
+        nano_cpus=$(docker inspect "$nginx_container" 2>/dev/null | jq -r '.[0].HostConfig.NanoCpus' 2>/dev/null || echo "0")
+        cpu_limit=$(docker inspect "$nginx_container" 2>/dev/null | jq -r '.[0].HostConfig.CpuShares' 2>/dev/null || echo "0")
+        
+        if [[ "$nano_cpus" != "0" && "$nano_cpus" != "null" ]]; then
+            # NanoCpus is in units of 10^-9 CPUs
+            local cpus_count
+            cpus_count=$(echo "scale=2; $nano_cpus / 1000000000" | bc 2>/dev/null || echo "Unknown")
+            echo "CPU limit: ✓ ($cpus_count CPUs)"
+        elif [[ "$cpu_limit" != "0" && "$cpu_limit" != "1024" && "$cpu_limit" != "null" ]]; then
             echo "CPU limit: ✓ (Shares: $cpu_limit)"
         else
             echo "CPU limit: ✗ (Unlimited)"
@@ -1186,9 +1260,10 @@ container_security_scan() {
         echo "Network Configuration:"
         echo "--------------------"
 
-        local network_mode=$(docker inspect "$nginx_container" 2>/dev/null | jq -r '.[0].HostConfig.NetworkMode' 2>/dev/null || echo "unknown")
+        local network_mode
+        network_mode=$(docker inspect "$nginx_container" 2>/dev/null | jq -r '.[0].HostConfig.NetworkMode' 2>/dev/null || echo "unknown")
         echo "Network mode: $network_mode"
-
+        
         if [[ "$network_mode" == "bridge" ]]; then
             echo "Bridge network: ✓ (Isolated)"
         else
@@ -1227,8 +1302,9 @@ container_security_scan() {
             print_info "Running comprehensive vulnerability scan with Trivy..."
 
             # Get the image name from the container
-            local image_name=$(docker inspect "$nginx_container" 2>/dev/null | jq -r '.[0].Config.Image' || echo "")
-
+            local image_name
+            image_name=$(docker inspect "$nginx_container" 2>/dev/null | jq -r '.[0].Config.Image' || echo "")
+            
             if [[ -n "$image_name" ]]; then
                 echo "Scanning image: $image_name"
                 echo
@@ -1247,7 +1323,8 @@ container_security_scan() {
 
                 echo
                 echo "--- Trivy JSON Output for Analysis ---"
-                local trivy_json=$(docker run --rm \
+                local trivy_json
+                trivy_json=$(docker run --rm \
                     -v /var/run/docker.sock:/var/run/docker.sock \
                     aquasec/trivy:latest \
                     image "$image_name" \
@@ -1258,10 +1335,14 @@ container_security_scan() {
                     2>/dev/null || echo "{}")
 
                 # Parse and summarize vulnerabilities
-                local total_vulns=$(echo "$trivy_json" | jq -r '.Results[].Vulnerabilities | length' 2>/dev/null | awk '{s+=$1} END {print s+0}')
-                local critical_vulns=$(echo "$trivy_json" | jq -r '[.Results[].Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' 2>/dev/null || echo "0")
-                local high_vulns=$(echo "$trivy_json" | jq -r '[.Results[].Vulnerabilities[]? | select(.Severity == "HIGH")] | length' 2>/dev/null || echo "0")
-                local medium_vulns=$(echo "$trivy_json" | jq -r '[.Results[].Vulnerabilities[]? | select(.Severity == "MEDIUM")] | length' 2>/dev/null || echo "0")
+                local total_vulns
+                total_vulns=$(echo "$trivy_json" | jq -r '.Results[].Vulnerabilities | length' 2>/dev/null | awk '{s+=$1} END {print s+0}')
+                local critical_vulns
+                critical_vulns=$(echo "$trivy_json" | jq -r '[.Results[].Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' 2>/dev/null || echo "0")
+                local high_vulns
+                high_vulns=$(echo "$trivy_json" | jq -r '[.Results[].Vulnerabilities[]? | select(.Severity == "HIGH")] | length' 2>/dev/null || echo "0")
+                local medium_vulns
+                medium_vulns=$(echo "$trivy_json" | jq -r '[.Results[].Vulnerabilities[]? | select(.Severity == "MEDIUM")] | length' 2>/dev/null || echo "0")
 
                 echo
                 echo "Vulnerability Summary:"
@@ -1286,7 +1367,8 @@ container_security_scan() {
                 fi
 
                 # Save detailed JSON report
-                local json_report_file="$report_dir/trivy_detailed_$(date +%Y%m%d_%H%M%S).json"
+                local json_report_file
+                json_report_file="$report_dir/trivy_detailed_$(date +%Y%m%d_%H%M%S).json"
                 echo "$trivy_json" > "$json_report_file" 2>/dev/null || echo "Failed to save JSON report"
                 echo "Detailed JSON report saved to: $json_report_file"
                 echo
@@ -1419,7 +1501,8 @@ if __name__ == '__main__':
 EOF
 
         # Get actual package versions from container
-        local package_versions=$(get_container_package_versions "$nginx_container")
+        local package_versions
+        package_versions=$(get_container_package_versions "$nginx_container")
 
         if command -v python3 >/dev/null 2>&1; then
             python3 "$script_path" "$package_versions" 2>&1 || echo "Cross-check encountered an error"
@@ -1483,7 +1566,8 @@ log_message() {
 run_security_scan() {
     log_message "Starting automated security scan"
 
-    local report_file="$REPORT_DIR/auto_scan_$(date +%Y%m%d_%H%M%S).txt"
+    local report_file
+    report_file="$REPORT_DIR/auto_scan_$(date +%Y%m%d_%H%M%S).txt"
 
     {
         echo "Automated Security Scan Report"
@@ -1505,8 +1589,15 @@ run_security_scan() {
         fi
 
         # Check SSL certificate expiry
+        local cert_file=""
         if [[ -f /opt/nginx/certs/cert.pem ]]; then
-            local expiry_date=$(openssl x509 -in /opt/nginx/certs/cert.pem -noout -enddate | cut -d= -f2)
+            cert_file="/opt/nginx/certs/cert.pem"
+        else
+            cert_file=$(find /opt/nginx/certs/ -maxdepth 1 -name "*.pem" ! -name "cert.pem" | head -n 1)
+        fi
+
+        if [[ -n "$cert_file" ]] && [[ -f "$cert_file" ]]; then
+            local expiry_date=$(openssl x509 -in "$cert_file" -noout -enddate | cut -d= -f2)
             local expiry_epoch=$(date -d "$expiry_date" +%s)
             local current_epoch=$(date +%s)
             local days_left=$(( (expiry_epoch - current_epoch) / 86400 ))
@@ -1555,6 +1646,24 @@ run_security_scan() {
         fi
         echo "Nginx status: $nginx_status"
 
+        # Check Hardening
+        if [[ -n "$nginx_container" ]]; then
+            local read_only=$(docker inspect "$nginx_container" --format='{{.HostConfig.ReadonlyRootfs}}' 2>/dev/null || echo "false")
+            if [[ "$read_only" == "true" ]]; then
+                echo "Read-only FS: ✓"
+            else
+                echo "Read-only FS: ✗"
+            fi
+
+            local nano_cpus=$(docker inspect "$nginx_container" --format='{{.HostConfig.NanoCpus}}' 2>/dev/null || echo "0")
+            if [[ "$nano_cpus" != "0" && "$nano_cpus" != "null" ]]; then
+                local cpus_count=$(echo "scale=2; $nano_cpus / 1000000000" | bc 2>/dev/null || echo "Unknown")
+                echo "CPU limit: ✓ ($cpus_count CPUs)"
+            else
+                echo "CPU limit: ✗ (Unlimited)"
+            fi
+        fi
+
         # Check disk space
         local disk_usage=$(df /opt/nginx | tail -1 | awk '{print $5}' | sed 's/%//')
         if [[ $disk_usage -gt 80 ]]; then
@@ -1575,7 +1684,7 @@ run_security_scan() {
             mail -s "Nginx Security Alert" "$REPORT_EMAIL" < "$report_file"
         fi
     fi
-}
+}   # End of run_security_scan function
 
 # Main execution
 run_security_scan
@@ -1592,6 +1701,7 @@ EOF
     fi
 
     # Create comprehensive vulnerability check script
+    print_info "Regenerating vulnerability check script..."
     cat > /opt/nginx/scripts/vulnerability_check.sh << 'EOF'
 #!/bin/bash
 
@@ -1605,6 +1715,42 @@ mkdir -p "$REPORT_DIR"
 # Function to log messages
 log_message() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
+}
+
+# Temporary directory for Python scripts
+NGINX_SCRIPTS_TEMP="/opt/nginx/scripts/temp"
+mkdir -p "$NGINX_SCRIPTS_TEMP"
+
+# Function to get package versions from container
+get_container_package_versions() {
+    local container="$1"
+    local versions_json="{\"nginx\":\"\",\"openssl\":\"\",\"libcrypto\":\"\"}"
+
+    if [[ -z "$container" ]]; then
+        echo "$versions_json"
+        return 1
+    fi
+
+    # Get nginx version
+    local nginx_version
+    nginx_version=$(docker exec "$container" nginx -v 2>&1 | sed -n 's/.*nginx\/\([0-9]*\.[0-9]*\.[0-9]*\).*/\1/p' || echo "")
+    if [[ -n "$nginx_version" ]]; then
+        versions_json=$(echo "$versions_json" | jq --arg v "$nginx_version" '.nginx = $v')
+    fi
+
+    # Get openssl version
+    local openssl_version
+    openssl_version=$(docker exec "$container" openssl version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[a-z]?' | head -n 1 || echo "")
+    if [[ -n "$openssl_version" ]]; then
+        versions_json=$(echo "$versions_json" | jq --arg v "$openssl_version" '.openssl = $v')
+    fi
+
+    # Get libcrypto version (same as openssl version)
+    if [[ -n "$openssl_version" ]]; then
+        versions_json=$(echo "$versions_json" | jq --arg v "$openssl_version" '.libcrypto = $v')
+    fi
+
+    echo "$versions_json"
 }
 
 # Function to run Trivy scan
@@ -1806,7 +1952,7 @@ PYEOF
     fi
 
     return 0
-}
+} # End of check_nvd_database function
 
 # Function to check OSV database
 check_osv_database() {
@@ -1927,12 +2073,14 @@ EOF
 
     chmod +x /opt/nginx/scripts/vulnerability_check.sh || print_error "Failed to set execute permissions"
 
-    # Setup weekly comprehensive scan
-    if ! crontab -l 2>/dev/null | grep -q "weekly_scan"; then
-        (crontab -l 2>/dev/null; echo "0 3 * * 0 /opt/nginx/scripts/weekly_scan.sh") | crontab - 2>/dev/null || print_error "Failed to setup weekly cron job"
+    # Setup additional cron jobs for vulnerability scanning
+    if ! crontab -l 2>/dev/null | grep -q "vulnerability_check.sh"; then
+        (crontab -l 2>/dev/null; echo "0 4 * * * /opt/nginx/scripts/vulnerability_check.sh") | crontab - 2>/dev/null || print_error "Failed to setup vulnerability check cron job"
+        print_success "Vulnerability check scheduled for daily 4:00 AM."
+    fi
 
-        # Create weekly scan script
-        cat > /opt/nginx/scripts/weekly_scan.sh << 'EOF'
+    # Create weekly scan script
+    cat > /opt/nginx/scripts/weekly_scan.sh << 'EOF'
 #!/bin/bash
 # Weekly comprehensive security scan
 
@@ -1980,23 +2128,16 @@ local report_file="$REPORT_DIR/weekly_summary_$(date +%Y%m%d).txt"
 
 log_message "Weekly comprehensive scan completed. Report: $report_file"
 EOF
-        chmod +x /opt/nginx/scripts/weekly_scan.sh || print_error "Failed to set execute permissions"
+    chmod +x /opt/nginx/scripts/weekly_scan.sh || print_error "Failed to set execute permissions"
 
+    # Setup weekly comprehensive scan
+    if ! crontab -l 2>/dev/null | grep -q "weekly_scan"; then
+        (crontab -l 2>/dev/null; echo "0 3 * * 0 /opt/nginx/scripts/weekly_scan.sh") | crontab - 2>/dev/null || print_error "Failed to setup weekly cron job"
         print_success "Weekly comprehensive scan scheduled for Sundays 3:00 AM."
     fi
 
-    # Setup additional cron jobs for vulnerability scanning
-    if ! crontab -l 2>/dev/null | grep -q "vulnerability_check.sh"; then
-        (crontab -l 2>/dev/null; echo "0 4 * * * /opt/nginx/scripts/vulnerability_check.sh") | crontab - 2>/dev/null || print_error "Failed to setup vulnerability check cron job"
-        print_success "Vulnerability check scheduled for daily 4:00 AM."
-    fi
-
-    # Setup monthly comprehensive scan
-    if ! crontab -l 2>/dev/null | grep -q "monthly_scan"; then
-        (crontab -l 2>/dev/null; echo "0 5 1 * * /opt/nginx/scripts/monthly_scan.sh") | crontab - 2>/dev/null || print_error "Failed to setup monthly cron job"
-
-        # Create monthly scan script
-        cat > /opt/nginx/scripts/monthly_scan.sh << 'EOF'
+    # Create monthly scan script
+    cat > /opt/nginx/scripts/monthly_scan.sh << 'EOF'
 #!/bin/bash
 # Monthly comprehensive security scan
 
@@ -2019,13 +2160,15 @@ log_message "Starting monthly comprehensive security scan"
 
 # Run container security scan if Docker is available
 if command -v docker >/dev/null 2>&1; then
-    # Source vulnerability scanner module
-    SCRIPT_DIR="/opt/nginx/scripts"
-    if [[ -f "/home/george_linux/Server_Setup/du_setup/modules/nginx_vuln_scanner.sh" ]]; then
-        source "/home/george_linux/Server_Setup/du_setup/modules/nginx_vuln_scanner.sh"
-        container_security_scan
-    fi
+    docker scan --accept-license nginx > "$REPORT_DIR/docker_scan_$(date +%Y%m).txt" 2>/dev/null || true
 fi
+
+# Archive old reports
+log_message "Archiving old security reports"
+mkdir -p "$REPORT_DIR/archive/$(date +%Y)"
+find "$REPORT_DIR" -maxdepth 1 -name "*.txt" -mtime +30 -exec mv {} "$REPORT_DIR/archive/$(date +%Y)/" \;
+
+log_message "Monthly comprehensive security scan completed"
 
 # Generate monthly summary
 local report_file="$REPORT_DIR/monthly_summary_$(date +%Y%m).txt"
@@ -2059,7 +2202,11 @@ local report_file="$REPORT_DIR/monthly_summary_$(date +%Y%m).txt"
 log_message "Monthly comprehensive scan completed. Report: $report_file"
 EOF
 
-        chmod +x /opt/nginx/scripts/monthly_scan.sh || print_error "Failed to set execute permissions"
+    chmod +x /opt/nginx/scripts/monthly_scan.sh || print_error "Failed to set execute permissions"
+
+    # Setup monthly comprehensive scan
+    if ! crontab -l 2>/dev/null | grep -q "monthly_scan"; then
+        (crontab -l 2>/dev/null; echo "0 5 1 * * /opt/nginx/scripts/monthly_scan.sh") | crontab - 2>/dev/null || print_error "Failed to setup monthly cron job"
         print_success "Monthly comprehensive scan scheduled for 1st of each month at 5:00 AM."
     fi
 
@@ -2529,7 +2676,8 @@ exit 0
 EOF
 
     # Compare hashes and only overwrite if different (idempotent)
-    local new_hash=$(md5sum "$temp_script" 2>/dev/null | awk '{print $1}' || echo "")
+    local new_hash
+    new_hash=$(md5sum "$temp_script" 2>/dev/null | awk '{print $1}' || echo "")
 
     if [[ "$script_hash" != "$new_hash" ]]; then
         mv "$temp_script" /opt/nginx/scripts/auto_update.sh
@@ -2541,10 +2689,12 @@ EOF
     fi
 
     # Setup cron job (idempotent)
-    local current_cron=$(crontab -l 2>/dev/null || echo "")
+    local current_cron
+    current_cron=$(crontab -l 2>/dev/null || echo "")
 
     # Remove existing auto_update.sh cron entries (more precise)
-    local new_cron=$(echo "$current_cron" | grep -v "/opt/nginx/scripts/auto_update.sh" || echo "")
+    local new_cron
+    new_cron=$(echo "$current_cron" | grep -v "/opt/nginx/scripts/auto_update.sh" || echo "")
 
     # Remove existing MAILTO entries (to avoid duplicates)
     new_cron=$(echo "$new_cron" | grep -v "^MAILTO=" || echo "")
