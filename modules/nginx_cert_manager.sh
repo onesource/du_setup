@@ -6,7 +6,9 @@
 # ============================================================================
 
 # Source dependencies
+# shellcheck disable=SC1091
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/config.sh"
+# shellcheck disable=SC1091
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/utils.sh"
 
 # Let's Encrypt Staging Flag
@@ -52,7 +54,8 @@ validate_domain() {
 validate_file_path() {
     local path="$1"
     # Resolve to absolute path to prevent directory traversal (../)
-    local abs_path=$(realpath "$path" 2>/dev/null || echo "$path")
+    local abs_path
+    abs_path=$(realpath "$path" 2>/dev/null || echo "$path")
     # Restrict operations to non-system critical paths
     if [[ "$abs_path" != /tmp/* ]] && [[ "$abs_path" != /home/* ]] && [[ "$abs_path" != /opt/* ]]; then
         print_error "Invalid file path: $path (Access restricted to /tmp, /home, or /opt)"
@@ -158,7 +161,8 @@ generate_self_signed_cert() {
     local SAN_LIST="DNS.1 = $DOMAIN"
     
     # Only add www if it's a root domain (exactly one dot, not localhost, not already www)
-    local dots=$(printf '%s' "$DOMAIN" | tr -cd '.' | wc -c)
+    local dots
+    dots=$(printf '%s' "$DOMAIN" | tr -cd '.' | wc -c)
     if [ "$dots" -eq 1 ] && [[ "$DOMAIN" != "localhost" && "$DOMAIN" != "www."* ]]; then
         SERVER_NAMES="$DOMAIN www.$DOMAIN"
         SAN_LIST="DNS.1 = $DOMAIN
@@ -325,7 +329,8 @@ setup_letsencrypt() {
 
     # Determine domains (Subdomain Awareness)
     local domains=("-d" "$DOMAIN")
-    local dots=$(printf '%s' "$DOMAIN" | tr -cd '.' | wc -c)
+    local dots
+    dots=$(printf '%s' "$DOMAIN" | tr -cd '.' | wc -c)
     if [ "$dots" -eq 1 ] && [[ "$DOMAIN" != "www."* ]]; then
         domains+=("-d" "www.$DOMAIN")
         print_info "Including www alias for root domain."
@@ -538,6 +543,7 @@ EOF
     # Set a trap to restart nginx if the script exits unexpectedly
     if [[ "$nginx_was_running" == "true" ]]; then
         # The command string for the trap is fully resolved here
+        # shellcheck disable=SC2064
         trap "print_error 'Script exited unexpectedly. Restarting Nginx to prevent downtime.' && $restart_cmd" EXIT
 
         # Now, stop nginx
@@ -569,11 +575,13 @@ EOF
         print_success "Auto-renewal setup dry-run completed successfully."
         # Show output on success as well, it can contain useful info
         if [[ -n "$dry_run_output" ]]; then
+            # shellcheck disable=SC2001
             echo "$dry_run_output" | sed 's/^/    /'
         fi
         return 0
     else
         print_error "Renewal dry-run failed. See details below:"
+        # shellcheck disable=SC2001
         echo "$dry_run_output" | sed 's/^/    /'
         echo
 
@@ -672,8 +680,10 @@ import_certificate() {
     fi
 
     # Verify that the certificate and private key match
-    local CERT_MOD=$(openssl x509 -noout -modulus -in "$CERT_FILE")
-    local KEY_MOD=$(openssl pkey -noout -modulus -in "$KEY_FILE")
+    local CERT_MOD
+    CERT_MOD=$(openssl x509 -noout -modulus -in "$CERT_FILE")
+    local KEY_MOD
+    KEY_MOD=$(openssl pkey -noout -modulus -in "$KEY_FILE")
 
     if [ "$CERT_MOD" != "$KEY_MOD" ]; then
         print_error "CRITICAL: Certificate and Private Key do not match!"
@@ -681,7 +691,8 @@ import_certificate() {
     fi
 
     # Extract domain from certificate
-    local DOMAIN=$(openssl x509 -in "$CERT_FILE" -noout -subject \
+    local DOMAIN
+    DOMAIN=$(openssl x509 -in "$CERT_FILE" -noout -subject \
         | sed -n 's/.*CN[ =]*\([^,/]*\).*/\1/p' | head -1)
     DOMAIN=${DOMAIN:-unknown}
 
@@ -729,8 +740,9 @@ view_certificate_status() {
     for cert_file in /opt/nginx/certs/*.pem; do
         [[ ! -f "$cert_file" ]] && continue
         found_any=true
-
-        local domain_file=$(basename "$cert_file")
+        
+        local domain_file
+        domain_file=$(basename "$cert_file")
         print_info "--- Certificate: $domain_file ---"
 
         # Display certificate information
@@ -846,15 +858,17 @@ check_renewal_status() {
         print_warning "No Certbot renewal configs found."
         return 0
     fi
-
-    local total=$(find /etc/letsencrypt/renewal -name "*.conf" | wc -l)
-    local lineages=$(find /etc/letsencrypt/live -mindepth 1 -type d | wc -l)
+    
+    local total
+    total=$(find /etc/letsencrypt/renewal -name "*.conf" | wc -l)
+    local lineages
+    lineages=$(find /etc/letsencrypt/live -mindepth 1 -type d | wc -l)
 
     print_success "$total renewal configs, $lineages live directories."
     print_info "Active certificates are stored in: /opt/nginx/certs/"
 
     if [[ $lineages -gt $total ]]; then
-        print_warning "$(($lineages - $total)) duplicate lineages detected."
+        print_warning "$((lineages - total)) duplicate lineages detected."
     fi
 
     # Stop nginx to free up port 80 for standalone mode
@@ -943,7 +957,8 @@ update_nginx_https_config() {
 
     # Determine server names (Subdomain Awareness)
     local SERVER_NAMES="$DOMAIN"
-    local dots=$(printf '%s' "$DOMAIN" | tr -cd '.' | wc -c)
+    local dots
+    dots=$(printf '%s' "$DOMAIN" | tr -cd '.' | wc -c)
     if [ "$dots" -eq 1 ] && [[ "$DOMAIN" != "localhost" && "$DOMAIN" != "www."* ]]; then
         SERVER_NAMES="$DOMAIN www.$DOMAIN"
     fi
@@ -1069,14 +1084,70 @@ regenerate_https_config() {
     # 1. Dynamically determine the domain
     local DOMAIN="${1:-}"
 
-    [[ -z "$DOMAIN" ]] && DOMAIN=$(grep -m1 'server_name.*;' /opt/nginx/conf.d/default.conf 2>/dev/null | awk '{print $2}' | sed 's/;//' | head -1)
+    [[ -z "$DOMAIN" ]] && DOMAIN=$(grep -m1 '^[[:space:]]*server_name' /opt/nginx/conf.d/default.conf 2>/dev/null | awk '{print $2}' | sed 's/;//' | head -1)
     DOMAIN=${DOMAIN:-localhost}
-    print_info "Using domain: $DOMAIN"
+    [[ "$DOMAIN" == "_" ]] && DOMAIN="localhost"
 
-    # 2. Check if certs exist for this domain
-    if [[ ! -f "/opt/nginx/certs/$DOMAIN.pem" || ! -f "/opt/nginx/certs/$DOMAIN.key" ]]; then
-        print_error "Missing certs for $DOMAIN at /opt/nginx/certs/. Generate first."
-        return 1
+    # 2. Check if certs exist (Try domain-specific first, then generic fallback, then smart detection)
+    local ACTUAL_CERT=""
+    local ACTUAL_KEY=""
+
+    if [[ -f "/opt/nginx/certs/$DOMAIN.pem" && -f "/opt/nginx/certs/$DOMAIN.key" ]]; then
+        ACTUAL_CERT="/opt/nginx/certs/$DOMAIN.pem"
+        ACTUAL_KEY="/opt/nginx/certs/$DOMAIN.key"
+    elif [[ -f "/opt/nginx/certs/cert.pem" && -f "/opt/nginx/certs/key.pem" ]]; then
+        ACTUAL_CERT="/opt/nginx/certs/cert.pem"
+        ACTUAL_KEY="/opt/nginx/certs/key.pem"
+        print_info "Using generic cert.pem/key.pem files."
+    else
+        # SMART DETECTION FALLBACK:
+        # If we didn't find specific or generic certs, search the directory for ANY pem/key pair
+        print_info "Searching for available certificates in /opt/nginx/certs/..."
+        local cert_files
+        cert_files=$(find /opt/nginx/certs -maxdepth 1 -name "*.pem" ! -name "cert.pem")
+        local cert_count
+        cert_count=$(echo "$cert_files" | grep -c ".pem" || echo 0)
+
+        if [ "$cert_count" -eq 1 ]; then
+            local cert_base
+            cert_base=$(basename "$cert_files" .pem)
+            if [[ -f "/opt/nginx/certs/$cert_base.key" ]]; then
+                DOMAIN="$cert_base"
+                ACTUAL_CERT="/opt/nginx/certs/$DOMAIN.pem"
+                ACTUAL_KEY="/opt/nginx/certs/$DOMAIN.key"
+                print_success "Found single certificate for $DOMAIN"
+            fi
+        elif [ "$cert_count" -gt 1 ]; then
+            print_warning "Multiple certificates found in /opt/nginx/certs/."
+            echo "Please select the domain to regenerate configuration for:"
+            local i=1
+            local domain_list=()
+            for f in $cert_files; do
+                local d
+                d=$(basename "$f" .pem)
+                echo "  $i) $d"
+                domain_list+=("$d")
+                i=$((i+1))
+            done
+            printf '%s' "${CYAN}Enter choice (1-$((i-1))): ${NC}"
+            local choice
+            read -r choice
+            if [[ "$choice" -gt 0 && "$choice" -lt "$i" ]]; then
+                DOMAIN="${domain_list[$((choice-1))]}"
+                ACTUAL_CERT="/opt/nginx/certs/$DOMAIN.pem"
+                ACTUAL_KEY="/opt/nginx/certs/$DOMAIN.key"
+                print_success "Selected domain: $DOMAIN"
+            else
+                print_error "Invalid selection."
+                return 1
+            fi
+        fi
+
+        # Final check after smart detection
+        if [[ -z "$ACTUAL_CERT" ]]; then
+            print_error "Missing certs for $DOMAIN at /opt/nginx/certs/. Generate first."
+            return 1
+        fi
     fi
 
     # 3. Detect nginx type and initialize paths
@@ -1085,8 +1156,10 @@ regenerate_https_config() {
     local EXT_HTTP_PORT=80   EXT_HTTPS_PORT=443
     local ROOT_DIR="/usr/share/nginx/html" CONFIG_DIR="/opt/nginx/conf.d"
     local TEST_CMD="docker exec nginx nginx -t -c /etc/nginx/nginx.conf" RELOAD_CMD="reload_nginx_service"
-    local CERT_PATH="/etc/nginx/certs/$DOMAIN.pem"
-    local KEY_PATH="/etc/nginx/certs/$DOMAIN.key"
+    local CERT_PATH_IN_CONTAINER
+    CERT_PATH_IN_CONTAINER="/etc/nginx/certs/$(basename "$ACTUAL_CERT")"
+    local KEY_PATH_IN_CONTAINER
+    KEY_PATH_IN_CONTAINER="/etc/nginx/certs/$(basename "$ACTUAL_KEY")"
 
     if systemctl is-active --quiet nginx 2>/dev/null; then
         NGINX_TYPE="system"
@@ -1094,8 +1167,8 @@ regenerate_https_config() {
         EXT_HTTP_PORT=80 EXT_HTTPS_PORT=443
         ROOT_DIR="/var/www/html" CONFIG_DIR="/etc/nginx/sites-available"
         TEST_CMD="nginx -t" RELOAD_CMD="systemctl reload nginx"
-        CERT_PATH="/opt/nginx/certs/$DOMAIN.pem"
-        KEY_PATH="/opt/nginx/certs/$DOMAIN.key"
+        CERT_PATH_IN_CONTAINER="$ACTUAL_CERT"
+        KEY_PATH_IN_CONTAINER="$ACTUAL_KEY"
     fi
 
     # 4. Backup existing
@@ -1105,7 +1178,7 @@ regenerate_https_config() {
         ts=$(date +%Y%m%d_%H%M%S)
         backup_file="$CONFIG_FILE.backup.$ts"
         cp "$CONFIG_FILE" "$backup_file"
-        print_info "Backup created: $(basename "$backup_file")"
+        print_info "Backup .conf file created: $(basename "$backup_file")"
     fi
 
     # 5. Apply permissions
@@ -1122,7 +1195,8 @@ regenerate_https_config() {
     fi
     # Determine server names (Subdomain Awareness)
     local SERVER_NAMES="$DOMAIN"
-    local dots=$(printf '%s' "$DOMAIN" | tr -cd '.' | wc -c)
+    local dots
+    dots=$(printf '%s' "$DOMAIN" | tr -cd '.' | wc -c)
     if [ "$dots" -eq 1 ] && [[ "$DOMAIN" != "localhost" && "$DOMAIN" != "www."* ]]; then
         SERVER_NAMES="$DOMAIN www.$DOMAIN"
     fi
@@ -1157,8 +1231,8 @@ server {
     limit_conn conn_limit_per_ip 10;
 
     # SSL configuration
-    ssl_certificate ${CERT_PATH};
-    ssl_certificate_key ${KEY_PATH};
+    ssl_certificate ${CERT_PATH_IN_CONTAINER};
+    ssl_certificate_key ${KEY_PATH_IN_CONTAINER};
     ssl_session_timeout 1d;
     ssl_session_cache shared:SSL:50m;
     ssl_session_tickets off;
@@ -1269,6 +1343,7 @@ EOF
         print_error "Configuration test failed. Restoring previous config..."
         # Find the most recent backup
         local latest_backup
+        # shellcheck disable=SC2012
         latest_backup=$(ls -t "$CONFIG_FILE.backup."* 2>/dev/null | head -1)
 
         if [[ -n "$latest_backup" ]]; then
@@ -1308,10 +1383,12 @@ delete_certificate() {
     for cert_file in /opt/nginx/certs/*.pem; do
         [[ ! -f "$cert_file" ]] && continue
         found_active=true
-        local domain=$(basename "$cert_file" .pem)
+        local domain
+        domain=$(basename "$cert_file" .pem)
         
         # Detect type
-        local issuer=$(openssl x509 -in "$cert_file" -noout -issuer 2>/dev/null)
+        local issuer
+        issuer=$(openssl x509 -in "$cert_file" -noout -issuer 2>/dev/null)
         local cert_type="Self-Signed/Imported"
         [[ "$issuer" == *"Let's Encrypt"* ]] && cert_type="Let's Encrypt"
 
@@ -1335,7 +1412,8 @@ delete_certificate() {
     if [ -d /etc/letsencrypt/live ]; then
         for lineage in /etc/letsencrypt/live/*; do
             [ ! -d "$lineage" ] && continue
-            local domain=$(basename "$lineage")
+            local domain
+            domain=$(basename "$lineage")
             [ "$domain" = "README" ] && continue
 
             echo "  $current_display_idx) Source: $domain"
@@ -1350,13 +1428,28 @@ delete_certificate() {
         return 0
     fi
 
-    echo
-    printf '%s\n' "${CYAN}Enter certificate number to delete (0=cancel): ${NC}"
-    read -r DELETE_CHOICE
-    if [ -z "$DELETE_CHOICE" ] || [ "$DELETE_CHOICE" = "0" ]; then
-        print_info "Deletion cancelled."
-        return 0
-    fi
+    while true; do
+        echo
+        printf '%s\n' "${CYAN}Enter certificate number to delete (0=cancel): ${NC}"
+        read -r DELETE_CHOICE
+        # Check for Cancel/Empty first
+        if [ -z "$DELETE_CHOICE" ] || [ "$DELETE_CHOICE" = "0" ]; then
+            print_info "Deletion cancelled."
+            return 0
+        fi
+
+        # Validate input is a number
+        case "$DELETE_CHOICE" in
+            *[!0-9]*)
+                # If the input contains anything that is NOT a digit
+                print_error "Invalid input: '$DELETE_CHOICE' is not a number. Please try again."
+                ;;
+            *)
+                # Input is valid numbers only (1, 12, 100, etc.)
+                break
+                ;;
+        esac
+    done
 
     # Check if they picked an active cert
     if [[ "$DELETE_CHOICE" -le "$active_count" ]]; then
@@ -1405,7 +1498,10 @@ delete_certificate() {
         fi
     fi
 
-    [ "$found_match" = "true" ] && reload_nginx_service || true
+    # If match found, offer to reload
+    if [ "$found_match" = "true" ]; then
+        reload_nginx_service
+    fi
     print_success "Certificate deletion process completed."
 }
 
@@ -1423,7 +1519,8 @@ deploy_existing_lineage() {
     if [ -d /etc/letsencrypt/live ]; then
         for lineage in /etc/letsencrypt/live/*; do
             [ ! -d "$lineage" ] && continue
-            local domain=$(basename "$lineage")
+            local domain
+            domain=$(basename "$lineage")
             [ "$domain" = "README" ] && continue
 
             echo "  $current_idx) $domain"
@@ -1470,7 +1567,8 @@ deploy_existing_lineage() {
         # 3. Update Nginx Config
         # Extract the primary domain (stripping -0001 suffixes for the Nginx server_name)
         # Note: We keep the filename as $selected_lineage for uniqueness
-        local primary_domain=$(echo "$selected_lineage" | sed 's/-[0-9]\{4\}$//')
+        # shellcheck disable=SC2001
+        echo "$selected_lineage" | sed 's/-[0-9]\{4\}$//' >/dev/null
 
         update_nginx_https_config "$selected_lineage"
         reload_nginx_service
