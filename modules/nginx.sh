@@ -6,7 +6,9 @@
 # ============================================================================
 
 # Source dependencies
+# shellcheck disable=SC1091
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/config.sh"
+# shellcheck disable=SC1091
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/utils.sh"
 
 # --- Nginx Installation Function ---
@@ -94,27 +96,33 @@ configure_nginx_security() {
                 return 0
                 ;;
             1)
+                # shellcheck disable=SC1091
                 source "$(dirname "${BASH_SOURCE[0]}")/nginx_cert_manager.sh"
                 manage_certificates
                 read -rp "$(printf '%s' "${CYAN}Another security task? (y/n): ${NC}")" continue_reply
                 [[ "$continue_reply" =~ ^[Nn] ]] && return 0
                 ;;
             2)
+                # shellcheck disable=SC1091
                 source "$(dirname "${BASH_SOURCE[0]}")/nginx_monitoring.sh"
                 setup_nginx_monitoring
                 ;;
             3)
+                # shellcheck disable=SC1091
                 source "$(dirname "${BASH_SOURCE[0]}")/nginx_vuln_scanner.sh"
                 manage_vulnerabilities || print_warning "Vulnerability scanning encountered errors"
                 ;;
             4)
                 # Install all security features
+                # shellcheck disable=SC1091
                 source "$(dirname "${BASH_SOURCE[0]}")/nginx_cert_manager.sh" 2>/dev/null || true
                 manage_certificates
 
+                # shellcheck disable=SC1091
                 source "$(dirname "${BASH_SOURCE[0]}")/nginx_monitoring.sh"   2>/dev/null || true
                 setup_nginx_monitoring
 
+                # shellcheck disable=SC1091
                 source "$(dirname "${BASH_SOURCE[0]}")/nginx_vuln_scanner.sh"  2>/dev/null || true
                 manage_vulnerabilities || print_warning "Vulnerability scanning encountered errors"
 
@@ -510,8 +518,11 @@ services:
         ipv4_address: 172.20.0.2
     security_opt:
       - no-new-privileges:true
-    # Note: read_only and tmpfs removed to fix permission issues with nginx user (UID 101)
-    # The nginx user needs write access to /var/cache/nginx and /var/run
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
     ulimits:
       nproc: 65535
       nofile:
@@ -521,8 +532,9 @@ services:
       resources:
         limits:
           memory: 512M
-        reservations:
           cpus: '0.5'
+        reservations:
+          cpus: '0.1'
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
@@ -723,7 +735,8 @@ remove_host_nginx() {
 
     # Backup legacy /etc/nginx if it exists and is NOT a symlink
     if [[ -d /etc/nginx && ! -L /etc/nginx ]]; then
-        local backup="/etc/nginx.backup.$(date +%Y%m%d_%H%M%S)"
+        local backup
+        backup="/etc/nginx.backup.$(date +%Y%m%d_%H%M%S)"
         mv /etc/nginx "$backup" 2>/dev/null || true
         print_info "Backed up legacy configs: $backup"
     fi
@@ -742,7 +755,6 @@ remove_host_nginx() {
 
 # --- Remove Nginx Docker Container ---
 remove_container_nginx() {
-    local COMPOSE_DIR="/opt/nginx"
     local CONTAINER_NAME="nginx"
 
     print_info "Removing nginx Docker container (unprivileged image, data preserved)..."
