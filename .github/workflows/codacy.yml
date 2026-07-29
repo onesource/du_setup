@@ -32,7 +32,7 @@ jobs:
     steps:
       # Checkout the repository to the GitHub Actions runner
       - name: Checkout code
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Reject CRLF shell scripts
         shell: bash
@@ -110,119 +110,61 @@ jobs:
 
           echo "Script structure validation completed"
 
-      # # Execute Codacy Analysis CLI and generate a SARIF output with the security issues identified during the analysis
-      # - name: Run Codacy Analysis CLI
-      #   uses: codacy/codacy-analysis-cli-action@d43360362776a6789b47b99ae8973510854e2d3d # master, pinned 2026-07-28
-      #   with:
-      #     # Check https://github.com/codacy/codacy-analysis-cli#project-token to get your project token from your Codacy repository
-      #     # You can also omit the token and run the tools that support default configurations
-      #     project-token: ${{ secrets.CODACY_PROJECT_TOKEN }}
-      #     verbose: true
-      #     output: results.sarif
-      #     format: sarif
-      #     # Adjust severity of non-security issues
-      #     gh-code-scanning-compat: true
-      #     # Force 0 exit code to allow SARIF file generation
-      #     # This will handover control about PR rejection to the GitHub side
-      #     max-allowed-issues: 2147483647
-
-      # # Upload the SARIF file generated in the previous step
-      # - name: Upload SARIF results file
-      #   uses: github/codeql-action/upload-sarif@3b0bd1d116c0bde30213346b22d4f634d96a2fb0 # v3
-      #   with:
-      #     sarif_file: results.sarif
-      #     # Use a unique category to avoid conflicts with other security scans
-      #     category: codacy-security-scan-${{ github.run_id }}
-
-      # === Codacy per-tool runs ===
-      - name: Run Codacy (Pylint)
-        uses: codacy/codacy-analysis-cli-action@d43360362776a6789b47b99ae8973510854e2d3d # master, pinned 2026-07-28
-        with:
-          # Check https://github.com/codacy/codacy-analysis-cli#project-token to get your project token from your Codacy repository
-          # You can also omit the token and run the tools that support default configurations
-          project-token: ${{ secrets.CODACY_PROJECT_TOKEN }}
-          tool: pylint
-          format: sarif
-          output: results-pylint.sarif
-          # Adjust severity of non-security issues
-          gh-code-scanning-compat: true
-          # Force 0 exit code to allow SARIF file generation
-          # This will handover control about PR rejection to the GitHub side
-          max-allowed-issues: 2147483647
-
-      # Upload the SARIF file generated in the previous step
-      - name: Upload SARIF (Pylint)
-        if: ${{ hashFiles('results-pylint.sarif') != '' }}
-        uses: github/codeql-action/upload-sarif@3b0bd1d116c0bde30213346b22d4f634d96a2fb0 # v3
-        with:
-          sarif_file: results-pylint.sarif
-          category: codacy-pylint
-
+      # This repository contains Bash, not standalone Python sources, so
+      # Pylint and Bandit are intentionally omitted. Embedded generated Python
+      # is validated by its owning shell modules.
       - name: Run Codacy (ShellCheck)
         uses: codacy/codacy-analysis-cli-action@d43360362776a6789b47b99ae8973510854e2d3d # master, pinned 2026-07-28
         with:
-          # Check https://github.com/codacy/codacy-analysis-cli#project-token to get your project token from your Codacy repository
-          # You can also omit the token and run the tools that support default configurations
           project-token: ${{ secrets.CODACY_PROJECT_TOKEN }}
           tool: shellcheck
           format: sarif
           output: results-shellcheck.sarif
-          # Adjust severity of non-security issues
           gh-code-scanning-compat: true
-          # Force 0 exit code to allow SARIF file generation
-          # This will handover control about PR rejection to the GitHub side
           max-allowed-issues: 2147483647
 
-      # Upload the SARIF file generated in the previous step
+      - name: Validate ShellCheck SARIF
+        id: shellcheck_sarif
+        shell: bash
+        run: |
+          if jq -e 'type == "object" and (.runs | type == "array") and (.runs | length > 0)' results-shellcheck.sarif >/dev/null 2>&1; then
+            echo "valid=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "valid=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Codacy ShellCheck did not produce uploadable SARIF; upload skipped."
+          fi
+
       - name: Upload SARIF (ShellCheck)
-        if: ${{ hashFiles('results-shellcheck.sarif') != '' }}
-        uses: github/codeql-action/upload-sarif@3b0bd1d116c0bde30213346b22d4f634d96a2fb0 # v3
+        if: ${{ steps.shellcheck_sarif.outputs.valid == 'true' }}
+        uses: github/codeql-action/upload-sarif@adfda868f108ac4222129de456ea554034a27db7 # v4
         with:
           sarif_file: results-shellcheck.sarif
           category: codacy-shellcheck
 
-      - name: Run Codacy (Bandit)
-        uses: codacy/codacy-analysis-cli-action@d43360362776a6789b47b99ae8973510854e2d3d # master, pinned 2026-07-28
-        with:
-          # Check https://github.com/codacy/codacy-analysis-cli#project-token to get your project token from your Codacy repository
-          # You can also omit the token and run the tools that support default configurations
-          project-token: ${{ secrets.CODACY_PROJECT_TOKEN }}
-          tool: bandit
-          format: sarif
-          output: results-bandit.sarif
-          # Adjust severity of non-security issues
-          gh-code-scanning-compat: true
-          # Force 0 exit code to allow SARIF file generation
-          # This will handover control about PR rejection to the GitHub side
-          max-allowed-issues: 2147483647
-
-      # Upload the SARIF file generated in the previous step
-      - name: Upload SARIF (Bandit)
-        if: ${{ hashFiles('results-bandit.sarif') != '' }}
-        uses: github/codeql-action/upload-sarif@3b0bd1d116c0bde30213346b22d4f634d96a2fb0 # v3
-        with:
-          sarif_file: results-bandit.sarif
-          category: codacy-bandit
-
       - name: Run Codacy (Trivy)
         uses: codacy/codacy-analysis-cli-action@d43360362776a6789b47b99ae8973510854e2d3d # master, pinned 2026-07-28
         with:
-          # Check https://github.com/codacy/codacy-analysis-cli#project-token to get your project token from your Codacy repository
-          # You can also omit the token and run the tools that support default configurations
           project-token: ${{ secrets.CODACY_PROJECT_TOKEN }}
           tool: trivy
           format: sarif
           output: results-trivy.sarif
-          # Adjust severity of non-security issues
           gh-code-scanning-compat: true
-          # Force 0 exit code to allow SARIF file generation
-          # This will handover control about PR rejection to the GitHub side
           max-allowed-issues: 2147483647
 
-      # Upload the SARIF file generated in the previous step
+      - name: Validate Trivy SARIF
+        id: trivy_sarif
+        shell: bash
+        run: |
+          if jq -e 'type == "object" and (.runs | type == "array") and (.runs | length > 0)' results-trivy.sarif >/dev/null 2>&1; then
+            echo "valid=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "valid=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Codacy Trivy did not produce uploadable SARIF; upload skipped."
+          fi
+
       - name: Upload SARIF (Trivy)
-        if: ${{ hashFiles('results-trivy.sarif') != '' }}
-        uses: github/codeql-action/upload-sarif@3b0bd1d116c0bde30213346b22d4f634d96a2fb0 # v3
+        if: ${{ steps.trivy_sarif.outputs.valid == 'true' }}
+        uses: github/codeql-action/upload-sarif@adfda868f108ac4222129de456ea554034a27db7 # v4
         with:
           sarif_file: results-trivy.sarif
           category: codacy-trivy
