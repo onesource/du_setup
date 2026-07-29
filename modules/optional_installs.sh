@@ -11,13 +11,27 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib/utils.sh"
 
 # --- Docker Installation Function ---
 install_docker() {
-    if ! confirm "Install Docker Engine (Optional)?"; then
-        print_info "Skipping Docker installation."
+    local installed=false enabled=false desired
+    command -v docker >/dev/null 2>&1 && installed=true
+    if [[ "$installed" == "true" ]] && systemctl is-enabled --quiet docker 2>/dev/null && systemctl is-active --quiet docker; then
+        enabled=true
+    fi
+    desired=$(prompt_component_desired docker "Docker Engine" "$installed" "$enabled") || return 1
+    state_set component.docker "$desired"
+    if [[ "$desired" != "true" ]]; then
+        print_info "Docker will remain uninstalled or disabled."
         return 0
     fi
+
     print_section "Docker Installation"
-    if command -v docker >/dev/null 2>&1; then
-        print_info "Docker already installed."
+    if [[ "$installed" == "true" ]]; then
+        if ! docker compose version >/dev/null 2>&1; then
+            print_info "Installing the required Docker Compose v2 plugin..."
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker-compose-plugin
+        fi
+        systemctl enable --now docker
+        print_info "Docker and Compose v2 are installed; preserving existing daemon configuration."
         return 0
     fi
     print_info "Removing old container runtimes..."
@@ -51,12 +65,31 @@ install_docker() {
 }
 EOF
     mkdir -p /etc/docker
-    if [[ -f /etc/docker/daemon.json ]] && cmp -s "$NEW_DOCKER_CONFIG" /etc/docker/daemon.json; then
-        print_info "Docker daemon configuration already correct. Skipping."
-        rm -f "$NEW_DOCKER_CONFIG"
+    command -v jq >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y -qq jq
+    local MERGED_DOCKER_CONFIG
+    MERGED_DOCKER_CONFIG=$(mktemp)
+    if [[ -f /etc/docker/daemon.json ]]; then
+        if ! jq empty /etc/docker/daemon.json >/dev/null 2>&1; then
+            print_error "/etc/docker/daemon.json is not valid JSON; refusing to overwrite it."
+            rm -f "$NEW_DOCKER_CONFIG" "$MERGED_DOCKER_CONFIG"
+            return 1
+        fi
+        jq -s '.[0] * .[1]' /etc/docker/daemon.json "$NEW_DOCKER_CONFIG" > "$MERGED_DOCKER_CONFIG"
     else
-        mv "$NEW_DOCKER_CONFIG" /etc/docker/daemon.json
-        chmod 644 /etc/docker/daemon.json
+        cp "$NEW_DOCKER_CONFIG" "$MERGED_DOCKER_CONFIG"
+    fi
+    rm -f "$NEW_DOCKER_CONFIG"
+    if command -v dockerd >/dev/null 2>&1 && ! dockerd --validate --config-file "$MERGED_DOCKER_CONFIG"; then
+        print_error "The merged Docker daemon configuration failed validation."
+        rm -f "$MERGED_DOCKER_CONFIG"
+        return 1
+    fi
+    if [[ -f /etc/docker/daemon.json ]] && cmp -s "$MERGED_DOCKER_CONFIG" /etc/docker/daemon.json; then
+        print_info "Docker daemon configuration already correct. Skipping."
+        rm -f "$MERGED_DOCKER_CONFIG"
+    else
+        install -m 0644 "$MERGED_DOCKER_CONFIG" /etc/docker/daemon.json
+        rm -f "$MERGED_DOCKER_CONFIG"
     fi
     systemctl daemon-reload
     systemctl enable --now docker
@@ -73,9 +106,15 @@ EOF
 
 # --- Tailscale Installation Function ---
 install_tailscale() {
-    if ! confirm "Install and configure Tailscale VPN (Optional)?"; then
-        print_info "Skipping Tailscale installation."
-        log "Tailscale installation skipped by user."
+    local installed=false enabled=false desired
+    command -v tailscale >/dev/null 2>&1 && installed=true
+    if [[ "$installed" == "true" ]] && systemctl is-enabled --quiet tailscaled 2>/dev/null && systemctl is-active --quiet tailscaled; then
+        enabled=true
+    fi
+    desired=$(prompt_component_desired tailscale "Tailscale" "$installed" "$enabled") || return 1
+    state_set component.tailscale "$desired"
+    if [[ "$desired" != "true" ]]; then
+        print_info "Tailscale will remain uninstalled or disabled. Enable it on a later run by answering yes."
         return 0
     fi
     print_section "Tailscale VPN Installation and Configuration"
@@ -177,18 +216,14 @@ install_tailscale() {
         fi
     fi
 
-    local TS_COMMAND="tailscale up"
-    if [[ "$TS_CONNECTION" == "2" ]]; then
-        TS_COMMAND="$TS_COMMAND --login-server=$LOGIN_SERVER"
-    fi
-    TS_COMMAND="$TS_COMMAND --auth-key=$AUTH_KEY --operator=$USERNAME"
-    TS_COMMAND_SAFE=$(echo "$TS_COMMAND" | sed -E 's/--auth-key=[^[:space:]]+/--auth-key=REDACTED/g')
-    print_info "Connecting to Tailscale with: $TS_COMMAND_SAFE"
-    if ! $TS_COMMAND; then
+    local -a TS_COMMAND=(tailscale up "--auth-key=$AUTH_KEY" "--operator=$USERNAME")
+    [[ "$TS_CONNECTION" == "2" ]] && TS_COMMAND+=("--login-server=$LOGIN_SERVER")
+    print_info "Connecting to Tailscale with an auth key (redacted)."
+    if ! "${TS_COMMAND[@]}"; then
         print_warning "Failed to connect to Tailscale. Possible issues: invalid pre-auth key, network restrictions, or server unavailability."
         print_info "Please run the following command manually after resolving the issue:"
-        printf '%s\n' "${CYAN}  $TS_COMMAND_SAFE${NC}"
-        log "Tailscale connection failed: $TS_COMMAND_SAFE"
+        printf '%s\n' "${CYAN}  tailscale up --auth-key=REDACTED${NC}"
+        log "Tailscale connection failed; authentication key redacted"
     else
         # Verify connection status with retries
         local RETRIES=3
@@ -209,7 +244,7 @@ install_tailscale() {
         done
         if $CONNECTED; then
             print_success "Tailscale connected successfully. Node IPv4 in tailnet: $TS_IPV4"
-            log "Tailscale connected: $TS_COMMAND_SAFE"
+            log "Tailscale connected successfully; authentication key redacted"
             # Store connection details for summary
             echo "${LOGIN_SERVER:-https://controlplane.tailscale.com}" > /tmp/tailscale_server
             echo "$TS_IPS" > /tmp/tailscale_ips.txt
@@ -217,108 +252,39 @@ install_tailscale() {
         else
             print_warning "Tailscale connection attempt succeeded, but no IPs assigned."
             print_info "Please verify with 'tailscale ip' and run the following command manually if needed:"
-            printf '%s\n' "${CYAN}  $TS_COMMAND_SAFE${NC}"
-            log "Tailscale connection not verified: $TS_COMMAND_SAFE"
+            printf '%s\n' "${CYAN}  tailscale status${NC}"
+            log "Tailscale connection succeeded but no address was observed."
             tailscale status > /tmp/tailscale_status.txt 2>&1
             log "Tailscale status output saved to /tmp/tailscale_status.txt for debugging"
         fi
     fi
 
-    # --- Configure Additional Flags ---
-    print_info "Select additional Tailscale options to configure (comma-separated, e.g., 1,3):"
-    printf '%s\n' "${CYAN}  1) SSH (--ssh) - WARNING: May restrict server access to Tailscale connections only${NC}"
-    printf '%s\n' "${CYAN}  2) Advertise as Exit Node (--advertise-exit-node)${NC}"
-    printf '%s\n' "${CYAN}  3) Accept DNS (--accept-dns)${NC}"
-    printf '%s\n' "${CYAN}  4) Accept Routes (--accept-routes)${NC}"
-    printf '%s\n' "${CYAN}  Enter numbers (1-4) or leave blank to skip:${NC}"
-    read -rp "  " TS_FLAG_CHOICES
-    local TS_FLAGS=""
-    if [[ -n "$TS_FLAG_CHOICES" ]]; then
-        if echo "$TS_FLAG_CHOICES" | grep -q "1"; then
-            TS_FLAGS="$TS_FLAGS --ssh"
-        fi
-        if echo "$TS_FLAG_CHOICES" | grep -q "2"; then
-            TS_FLAGS="$TS_FLAGS --advertise-exit-node"
-        fi
-        if echo "$TS_FLAG_CHOICES" | grep -q "3"; then
-            TS_FLAGS="$TS_FLAGS --accept-dns"
-        fi
-        if echo "$TS_FLAG_CHOICES" | grep -q "4"; then
-            TS_FLAGS="$TS_FLAGS --accept-routes"
-        fi
-        if [[ -n "$TS_FLAGS" ]]; then
-            # Ensure tailscaled service is still running
-            if ! systemctl is-active --quiet tailscaled; then
-                print_info "Starting tailscaled service..."
-                systemctl enable --now tailscaled
-                sleep 3
-            fi
+    # --- Reconcile Additional Flags ---
+    local ssh_current exit_current dns_current routes_current
+    ssh_current=$(state_get tailscale.ssh false)
+    exit_current=$(state_get tailscale.exit_node false)
+    dns_current=$(state_get tailscale.accept_dns false)
+    routes_current=$(state_get tailscale.accept_routes false)
 
-            # Verify tailscale command is available
-            if ! command -v tailscale >/dev/null 2>&1; then
-                # Try to add common Tailscale installation paths to PATH
-                export PATH="$PATH:/usr/bin:/usr/local/bin"
+    local ssh_desired exit_desired dns_desired routes_desired
+    ssh_desired=$(prompt_bool_current "Enable Tailscale SSH?" "$ssh_current") || return 1
+    exit_desired=$(prompt_bool_current "Advertise this server as an exit node?" "$exit_current") || return 1
+    dns_desired=$(prompt_bool_current "Accept Tailscale DNS?" "$dns_current") || return 1
+    routes_desired=$(prompt_bool_current "Accept Tailscale routes?" "$routes_current") || return 1
 
-                # Check again after updating PATH
-                if ! command -v tailscale >/dev/null 2>&1; then
-                    print_error "Tailscale command not found. Cannot apply additional options."
-                    return 1
-                fi
-            fi
-
-            TS_COMMAND="tailscale up"
-            if [[ "$TS_CONNECTION" == "2" ]]; then
-                TS_COMMAND="$TS_COMMAND --login-server=$LOGIN_SERVER"
-            fi
-            TS_COMMAND="$TS_COMMAND --auth-key=$AUTH_KEY --operator=$USERNAME $TS_FLAGS"
-            TS_COMMAND_SAFE=$(echo "$TS_COMMAND" | sed -E 's/--auth-key=[^[:space:]]+/--auth-key=REDACTED/g')
-            print_info "Reconfiguring Tailscale with additional options: $TS_COMMAND_SAFE"
-            if ! $TS_COMMAND; then
-                print_warning "Failed to reconfigure Tailscale with additional options."
-                print_info "Please run the following command manually after resolving the issue:"
-                printf '%s\n' "${CYAN}  $TS_COMMAND_SAFE${NC}"
-                log "Tailscale reconfiguration failed: $TS_COMMAND_SAFE"
-            else
-                # Verify reconfiguration status with retries
-                local RETRIES=3
-                local DELAY=5
-                local CONNECTED=false
-                local TS_IPS TS_IPV4
-                for ((i=1; i<=RETRIES; i++)); do
-                    if tailscale ip >/dev/null 2>&1; then
-                        TS_IPS=$(tailscale ip 2>/dev/null || echo "Unknown")
-                        TS_IPV4=$(echo "$TS_IPS" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || echo "Unknown")
-                        if [[ -n "$TS_IPV4" && "$TS_IPV4" != "Unknown" ]]; then
-                            CONNECTED=true
-                            break
-                        fi
-                    fi
-                    print_info "Waiting for Tailscale to connect ($i/$RETRIES)..."
-                    sleep $DELAY
-                done
-                if $CONNECTED; then
-                    print_success "Tailscale reconfigured with additional options. Node IPv4 in tailnet: $TS_IPV4"
-                    log "Tailscale reconfigured: $TS_COMMAND_SAFE"
-		    # Store flags and IPs for summary
-                    echo "$TS_FLAGS" | sed 's/ --/ /g' | sed 's/^ *//' > /tmp/tailscale_flags
-                    echo "$TS_IPS" > /tmp/tailscale_ips.txt
-                else
-                    print_warning "Tailscale reconfiguration attempt succeeded, but no IPs assigned."
-                    print_info "Please verify with 'tailscale ip' and run the following command manually if needed:"
-                    printf '%s\n' "${CYAN}  $TS_COMMAND_SAFE${NC}"
-                    log "Tailscale reconfiguration not verified: $TS_COMMAND"
-                    tailscale status > /tmp/tailscale_status.txt 2>&1
-                    log "Tailscale status output saved to /tmp/tailscale_status.txt for debugging"
-                fi
-            fi
-        else
-            print_info "No valid Tailscale options selected."
-            log "No valid Tailscale options selected."
-        fi
-    else
-        print_info "No additional Tailscale options selected."
-        log "No additional Tailscale options applied."
+    local -a set_command=(tailscale set
+        "--ssh=$ssh_desired"
+        "--advertise-exit-node=$exit_desired"
+        "--accept-dns=$dns_desired"
+        "--accept-routes=$routes_desired")
+    if ! "${set_command[@]}"; then
+        print_error "Failed to apply Tailscale preferences; existing preferences were left active."
+        return 1
     fi
+    state_set tailscale.ssh "$ssh_desired"
+    state_set tailscale.exit_node "$exit_desired"
+    state_set tailscale.accept_dns "$dns_desired"
+    state_set tailscale.accept_routes "$routes_desired"
     print_success "Tailscale setup complete."
     print_info "Verify status: tailscale ip"
     log "Tailscale setup completed."

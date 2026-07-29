@@ -2375,48 +2375,31 @@ update_docker_nginx() {
 
     log_message "Current image: $current_image"
 
-    # Pull latest image
-    log_message "Pulling latest image: $current_image"
-
-    # Get current image digest before pull (for idempotency)
-    local current_digest=$(docker images "$current_image" --format "{{.Digest}}" | head -1 || echo "")
-
-    if docker pull "$current_image" >> "$LOG_FILE" 2>&1; then
-        log_message "Successfully pulled latest image"
-
-        # Get new image digest after pull
-        local new_digest=$(docker images "$current_image" --format "{{.Digest}}" | head -1 || echo "")
-
-        # Check if image was actually updated (idempotent)
-        if [[ "$new_digest" != "$current_digest" ]] && [[ -n "$new_digest" ]]; then
-            log_message "Image updated - recreating container"
-
-            # Stop and remove old container
-            cd /opt/nginx || {
-                log_message "Failed to change to /opt/nginx directory"
-                return 1
-            }
-
-            if docker compose down >> "$LOG_FILE" 2>&1; then
-                log_message "Stopped old container"
-            else
-                log_message "Warning: Failed to stop container gracefully"
-            fi
-
-            # Start new container
-            if docker compose up -d >> "$LOG_FILE" 2>&1; then
-                log_message "Successfully started new container"
-                updated=true
-            else
-                log_message "ERROR: Failed to start new container"
-                return 1
-            fi
+    # Pull Compose images, then recreate only when the running image ID
+    # differs. Production containers are never rebuilt by this cron job.
+    log_message "Checking Compose images for updates"
+    cd /opt/nginx || {
+        log_message "Failed to change to /opt/nginx directory"
+        return 1
+    }
+    local running_image_id desired_image desired_image_id
+    running_image_id=$(docker inspect --format '{{.Image}}' "$container_name" 2>/dev/null || true)
+    if ! docker compose pull >> "$LOG_FILE" 2>&1; then
+        log_message "ERROR: Failed to pull Compose images"
+        return 1
+    fi
+    desired_image=$(docker compose config --images 2>/dev/null | head -n1)
+    desired_image_id=$(docker image inspect --format '{{.Id}}' "$desired_image" 2>/dev/null || true)
+    if [[ -n "$desired_image_id" && "$desired_image_id" != "$running_image_id" ]]; then
+        log_message "A new immutable image is available; recreating the service"
+        if docker compose up -d --no-build >> "$LOG_FILE" 2>&1; then
+            updated=true
         else
-            log_message "Image already up to date (no changes)"
+            log_message "ERROR: Failed to recreate service with pulled image"
+            return 1
         fi
     else
-        log_message "ERROR: Failed to pull latest image"
-        return 1
+        log_message "Running image already matches the desired image; no restart needed"
     fi
 
     if [[ "$updated" == "true" ]]; then
@@ -2582,9 +2565,6 @@ log_message "=========================================="
 log_message "Starting Nginx auto-update"
 log_message "=========================================="
 
-# Ensure lock file is in place
-check_lock
-
 # Initialize status variables
 DOCKER_UPDATE_STATUS="Skipped"
 SYSTEM_UPDATE_STATUS="Skipped"
@@ -2616,12 +2596,7 @@ case "$UPDATE_TYPE" in
             DOCKER_UPDATE_STATUS="Failed"
         fi
 
-        # Also update Alpine packages
-        if update_alpine_packages; then
-            ALPINE_UPDATE_STATUS="Success"
-        else
-            ALPINE_UPDATE_STATUS="Failed"
-        fi
+        ALPINE_UPDATE_STATUS="Immutable image; rebuild in CI"
         ;;
     system)
         log_message "Updating system Nginx"

@@ -1,5 +1,20 @@
 # Changelog for du_setup_modular.sh
 
+## Version 0.75.0-modular  Reconciler safety redesign | 2026-07-28
+
+- Added persistent root-owned intent state and managed-administrator migration/validation.
+- Made live values the default for core prompts; Enter preserves current state.
+- Separated quiet output from non-interactive consent and made missing non-interactive input fail closed.
+- Normalized shell scripts to LF and added Bash/ShellCheck CI gates.
+- Replaced SSH mutation with a validate-first managed snippet and complete rollback.
+- Required Docker Compose v2 and separated persisted Nginx backend choice.
+- Preserved PostgreSQL `pg_hba.conf` and container database application configuration.
+- Added recipient-key encrypted native database backups.
+- Implemented simulated, individually confirmed provider cleanup.
+- Bound the Nginx monitoring API locally and added systemd sandboxing.
+- Replaced unconditional Nginx rebuilds with image-ID comparison.
+- Replaced single-file self-update with validated whole-repository atomic replacement.
+
 ## Version 0.74-modular | 2025-11-08
 
 ### Modular Architecture

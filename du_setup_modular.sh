@@ -2,7 +2,6 @@
 
 # ============================================================================
 # Debian and Ubuntu Server Hardening Interactive Script (Modular Version)
-# Version: 0.74.2_modular | 2026-01-10
 #
 # This is the modular version of du_setup.sh that sources separate modules
 # for better maintainability and organization.
@@ -35,7 +34,8 @@ show_usage() {
 
     printf "\n%sModifiers:%s\n" "$BOLD" "$NC"
     printf "  %-22s %s\n" "--skip-cleanup" "Skip provider cleanup entirely during a full setup run."
-    printf "  %-22s %s\n" "--quiet" "Suppress verbose output (intended for automation)."
+    printf "  %-22s %s\n" "--quiet" "Suppress informational output; prompts are still shown."
+    printf "  %-22s %s\n" "--non-interactive" "Keep detected values; fail if a new answer is required."
     printf "  %-22s %s\n" "-h, --help" "Display this help message and exit."
 
     printf "\n%sUsage Examples:%s\n" "$BOLD" "$NC"
@@ -52,11 +52,16 @@ show_usage() {
 while [[ $# -gt 0 ]]; do
     case $1 in
         --quiet) VERBOSE=false; shift ;;
+        --non-interactive) NON_INTERACTIVE=true; shift ;;
         --cleanup-preview) CLEANUP_PREVIEW=true; shift ;;
         --cleanup-only) CLEANUP_ONLY=true; shift ;;
         --skip-cleanup) SKIP_CLEANUP=true; shift ;;
         -h|--help) show_usage ;;
-        *) shift ;;
+        *)
+            printf 'Unknown option: %s\n' "$1" >&2
+            printf 'Use --help for supported options.\n' >&2
+            exit 2
+            ;;
     esac
 done
 
@@ -147,9 +152,6 @@ handle_error() {
 # --- Main Function ---
 main() {
     trap 'handle_error $LINENO' ERR
-
-    # Suppress Python SyntaxWarning messages globally during script execution
-    export PYTHONWARNINGS="ignore::SyntaxWarning"
 
     # Initialize logging
     log "Starting modular Debian/Ubuntu hardening script."

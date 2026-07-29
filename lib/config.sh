@@ -7,6 +7,11 @@
 
 # shellcheck disable=SC2034  # Variables are used in other modules that source this file
 
+if [[ "${DU_SETUP_CONFIG_LOADED:-false}" == "true" ]]; then
+    return 0 2>/dev/null || exit 0
+fi
+DU_SETUP_CONFIG_LOADED=true
+
 # --- Admin Info ---
 # Default email address for notifications (can be changed in the menu)
 # admin@example.com
@@ -18,18 +23,31 @@ ADMIN_EMAIL="admin@example.com"
 LETSENCRYPT_ENVIRONMENT="staging"
 
 # --- Update Configuration ---
-CURRENT_VERSION="0.74.2_modular"
+CURRENT_VERSION="0.75.0_modular"
 SCRIPT_URL="https://raw.githubusercontent.com/onesource/du_setup/refs/heads/main/du_setup_modular.sh"
 CONFIG_URL="https://raw.githubusercontent.com/onesource/du_setup/refs/heads/main/lib/config.sh"
 CHECKSUM_URL="${SCRIPT_URL}.sha256"
+REPOSITORY_API_URL="https://api.github.com/repos/onesource/du_setup/commits/main"
+REPOSITORY_ARCHIVE_BASE="https://github.com/onesource/du_setup/archive"
 
 # --- Script Variables ---
 LOG_FILE="/var/log/du_setup_$(date +%Y%m%d_%H%M%S).log"
 BACKUP_LOG="/var/log/backup_rsync.log"
 REPORT_FILE="/var/log/du_setup_report_$(date +%Y%m%d_%H%M%S).txt"
 VERBOSE=true
+NON_INTERACTIVE=false
 BACKUP_DIR="/root/setup_harden_backup_$(date +%Y%m%d_%H%M%S)"
 ORIGINAL_ARGS="$*"
+
+# Persistent reconciler state. Live state is observed on every run; these
+# files record only explicit user intent for settings owned by du_setup.
+DU_SETUP_ETC_DIR="/etc/du-setup"
+DU_SETUP_STATE_DIR="${DU_SETUP_ETC_DIR}/state"
+DU_SETUP_CREDENTIALS_DIR="${DU_SETUP_ETC_DIR}/credentials"
+DU_SETUP_MANIFEST_DIR="${DU_SETUP_ETC_DIR}/managed"
+MANAGED_ADMIN_STATE="${DU_SETUP_STATE_DIR}/managed_admin"
+LEGACY_MANAGED_ADMIN_STATE="/root/.du_setup_managed_user"
+STATE_SCHEMA_VERSION="1"
 
 # --- Operational Mode Flags ---
 CLEANUP_PREVIEW=false
@@ -117,6 +135,12 @@ DISK_THRESHOLD=90  # New: Disk usage %
 
 # --- Initialize Configuration ---
 init_config() {
+    install -d -m 0700 "$DU_SETUP_ETC_DIR" "$DU_SETUP_STATE_DIR" \
+        "$DU_SETUP_CREDENTIALS_DIR"
+    install -d -m 0750 "$DU_SETUP_MANIFEST_DIR"
+    printf '%s\n' "$STATE_SCHEMA_VERSION" > "${DU_SETUP_STATE_DIR}/schema_version"
+    chmod 0600 "${DU_SETUP_STATE_DIR}/schema_version"
+
     # Create backup directory if it doesn't exist
     mkdir -p "$BACKUP_DIR" && chmod 700 "$BACKUP_DIR"
 

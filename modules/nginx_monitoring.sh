@@ -1351,10 +1351,10 @@ def get_security_data():
     patterns = {
         'SQL Injection': re.compile(r'(union\s+select|select\s+.*\s+from|insert\s+into)', re.I),
         'XSS/Injection': re.compile(r'(script|<|%3c|%3e|>)', re.I),
-        'Path Traversal': re.compile(r'(etc/passwd|/etc/|../|boot\.ini)', re.I),
-        'Brute Force/Admin': re.compile(r'(wp-login|admin\.php|login\.php|wp-admin|xmlrpc)', re.I),
+        'Path Traversal': re.compile(r'(etc/passwd|/etc/|\.\./|boot\.ini)', re.I),
+        'Brute Force/Admin': re.compile(r'(wp-login|admin\.php|login\.php|wp-admin|xmlrpc\.php)', re.I),
         'Exploit/Execution': re.compile(r'(cgi-bin|mindex|shell|cmd\.exe|powershell|\$\{)', re.I),
-        'Scan/Probing': re.compile(r'(\.env|\.git|config|phpinfo|\.aws|\.ssh)', re.I)
+        'Scan/Probing': re.compile(r'(\.env|\.git|config\.php|phpinfo|\.aws|\.ssh)', re.I)
     }
 
     try:
@@ -1477,7 +1477,7 @@ def metrics():
     })
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8081, debug=False)
+    app.run(host='127.0.0.1', port=8081, debug=False)
 EOF
 
     chmod +x /opt/nginx/scripts/metrics_server.py
@@ -1494,6 +1494,16 @@ User=root
 ExecStart=/usr/bin/python3 /opt/nginx/scripts/metrics_server.py
 Restart=always
 RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/var/log/nginx
 StandardOutput=journal
 StandardError=journal
 
@@ -1826,6 +1836,16 @@ User=root
 ExecStart=/opt/nginx/scripts/perf_monitor.sh
 Restart=always
 RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/var/log/nginx
 StandardOutput=journal
 StandardError=journal
 

@@ -13,13 +13,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib/utils.sh"
 cleanup_provider_packages() {
     print_section "Provider Package Cleanup (Optional)"
 
-    # --quiet mode check
-    if [[ "$VERBOSE" == "false" ]]; then
-        print_warning "Provider cleanup cannot be run in --quiet mode due to its interactive nature. Skipping."
-        log "Provider cleanup skipped due to --quiet mode."
-        return 0
-    fi
-
     # Validate required variables
     if [[ -z "${LOG_FILE:-}" ]]; then
         LOG_FILE="/var/log/du_setup_$(date +%Y%m%d_%H%M%S).log"
@@ -286,19 +279,63 @@ cleanup_provider_packages() {
         return 0
     fi
 
-    # Continue with actual cleanup logic...
-    # [The rest of the cleanup logic would continue here]
-    # For brevity, I'm showing the structure - the full implementation would include
-    # all the package removal, user management, and SSH key audit logic from the original script
-
-    log "Provider package cleanup completed."
+    if [[ ${#PROVIDER_PACKAGES[@]} -gt 0 ]]; then
+        printf '  Candidate packages:
+'
+        printf '    - %s
+' "${PROVIDER_PACKAGES[@]}"
+    fi
+    if [[ ${#PROVIDER_USERS[@]} -gt 0 ]]; then
+        printf '  Candidate provisioning users:
+'
+        printf '    - %s
+' "${PROVIDER_USERS[@]}"
+    fi
+    if [[ ${#ROOT_SSH_KEYS[@]} -gt 0 ]]; then
+        print_warning "Root authorized_keys is audit-only and will never be changed automatically."
+    fi
 
     if [[ "$CLEANUP_PREVIEW" == "true" ]]; then
-        printf '\n'
-        print_success "=== PREVIEW COMPLETED ==="
-        print_info "No changes were made to the system."
-        print_info "Run without --cleanup-preview flag to execute these actions."
-    else
-        print_success "Cleanup function completed successfully."
+        print_success "Preview completed. Every candidate requires individual confirmation during apply."
+        return 0
     fi
+
+    local packages_to_remove=() users_to_remove=() pkg user
+    for pkg in "${PROVIDER_PACKAGES[@]}"; do
+        if confirm "Remove provider/guest package '$pkg'?" "n"; then
+            packages_to_remove+=("$pkg")
+        fi
+    done
+
+    if [[ ${#packages_to_remove[@]} -gt 0 ]]; then
+        print_info "Simulating package purge and dependency changes..."
+        if ! apt-get -s purge "${packages_to_remove[@]}" | tee -a "$LOG_FILE"; then
+            print_error "APT simulation failed; no provider packages were removed."
+            return 1
+        fi
+        if confirm "Apply exactly this simulated package purge?" "n"; then
+            DEBIAN_FRONTEND=noninteractive apt-get purge -y "${packages_to_remove[@]}"
+            print_success "Selected provider packages removed."
+        else
+            print_info "Package removal cancelled after simulation."
+        fi
+    fi
+
+    for user in "${PROVIDER_USERS[@]}"; do
+        if pgrep -u "$user" >/dev/null 2>&1; then
+            print_warning "Skipping user '$user' because it has running processes."
+            continue
+        fi
+        if confirm "Disable and remove provisioning account '$user' (home preserved)?" "n"; then
+            users_to_remove+=("$user")
+        fi
+    done
+    for user in "${users_to_remove[@]}"; do
+        usermod --lock --expiredate 1 "$user" 2>/dev/null || true
+        userdel "$user"
+        print_success "Removed account '$user'; its home directory was preserved."
+    done
+
+    log "Provider cleanup completed: packages=${packages_to_remove[*]:-none}, users=${users_to_remove[*]:-none}."
+    print_success "Provider cleanup completed with only explicitly confirmed changes."
 }

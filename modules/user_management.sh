@@ -213,6 +213,9 @@ setup_user() {
 
     if getent group sudo | grep -qw "$USERNAME"; then
         print_success "Sudo group membership confirmed for '$USERNAME'."
+        state_set managed_admin "$USERNAME"
+        printf '%s\n' "$USERNAME" > "$LEGACY_MANAGED_ADMIN_STATE"
+        chmod 0600 "$LEGACY_MANAGED_ADMIN_STATE"
     else
         print_warning "Sudo group membership verification failed. Please check manually with 'sudo -l' as $USERNAME."
     fi

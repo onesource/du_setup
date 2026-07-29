@@ -5,6 +5,11 @@
 # Common functions used across multiple modules
 # ============================================================================
 
+if [[ "${DU_SETUP_UTILS_LOADED:-false}" == "true" ]]; then
+    return 0 2>/dev/null || exit 0
+fi
+DU_SETUP_UTILS_LOADED=true
+
 # --- Color Definitions ---
 if command -v tput >/dev/null 2>&1 && tput setaf 1 >/dev/null 2>&1; then
     RED=$(tput setaf 1)
@@ -40,7 +45,7 @@ print_header() {
     printf '%s\n' "${CYAN}╔═════════════════════════════════════════════════════════════════╗${NC}"
     printf '%s\n' "${CYAN}║                                                                 ║${NC}"
     printf '%s\n' "${CYAN}║       DEBIAN/UBUNTU SERVER SETUP AND HARDENING SCRIPT           ║${NC}"
-    printf '%s\n' "${CYAN}║                 v0.74.2_modular | 2026-01-10                    ║${NC}"
+    printf '%s\n' "${CYAN}║                 v0.75.0_modular | 2026-07-28                    ║${NC}"
     printf '%s\n' "${CYAN}║                                                                 ║${NC}"
     printf '%s\n' "${CYAN}╚═════════════════════════════════════════════════════════════════╝${NC}"
     printf '\n'
@@ -51,7 +56,7 @@ print_header() {
             printf '╔═════════════════════════════════════════════════════════════════╗\n'
             printf '║                                                                 ║\n'
             printf '║       DEBIAN/UBUNTU SERVER SETUP AND HARDENING SCRIPT           ║\n'
-            printf '║                 v0.74.2_modular | 2026-01-10                    ║\n'
+            printf '║                 v0.75.0_modular | 2026-07-28                    ║\n'
             printf '║                                                                 ║\n'
             printf '╚═════════════════════════════════════════════════════════════════╝\n'
             printf '\n'
@@ -136,9 +141,26 @@ validate_port() {
     [[ "$port" =~ ^[0-9]+$ && "$port" -ge 1024 && "$port" -le 65535 ]]
 }
 
+validate_ssh_port() {
+    local port="$1"
+    [[ "$port" == "22" ]] || validate_port "$port"
+}
+
 validate_backup_port() {
     local port="$1"
     [[ "$port" =~ ^[0-9]+$ && "$port" -ge 1 && "$port" -le 65535 ]]
+}
+
+validate_backup_destination() {
+    [[ "$1" =~ ^[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+$ ]]
+}
+
+validate_remote_backup_path() {
+    [[ "$1" =~ ^/[^[:space:]]*/$ ]]
+}
+
+validate_cron_schedule() {
+    [[ "$1" =~ ^((\*/)?[0-9,-]+|\*)[[:space:]]+(((\*/)?[0-9,-]+|\*)[[:space:]]+){3}((\*/)?[0-9,-]+|\*|[0-6])$ ]]
 }
 
 validate_ssh_key() {
@@ -168,7 +190,10 @@ confirm() {
     local default="${2:-n}"
     local response
 
-    [[ $VERBOSE == false ]] && return 0
+    if [[ "${NON_INTERACTIVE:-false}" == "true" ]]; then
+        print_error "A required answer was not supplied in non-interactive mode: $prompt"
+        return 2
+    fi
 
     if [[ $default == "y" ]]; then
         prompt="$prompt [Y/n]: "
@@ -190,6 +215,140 @@ confirm() {
             *) printf '%s\n' "${RED}Please answer yes or no.${NC}" ;;
         esac
     done
+}
+
+prompt_component_desired() {
+    local key="$1" label="$2" installed="$3" enabled="$4"
+    local stored current
+    stored=$(state_get "component.${key}" "")
+
+    if [[ "$installed" == "true" && "$enabled" != "true" ]]; then
+        current=false
+        print_warning "$label is installed but disabled; treating that as intentional." >&2
+        print_info "To enable it later, rerun this installer and explicitly answer yes." >&2
+    elif [[ "$installed" == "true" ]]; then
+        current=true
+    elif [[ -n "$stored" ]]; then
+        current=$(normalize_bool "$stored") || current=true
+    else
+        # First-run policy: install supported optional components unless the
+        # operator explicitly declines.
+        current=true
+    fi
+
+    prompt_bool_current "Manage and enable $label?" "$current"
+}
+
+# Persistent state is stored one value per root-owned file. Values are data,
+# never sourced as shell code.
+state_path() {
+    local key="$1"
+    [[ "$key" =~ ^[a-zA-Z0-9_.-]+$ ]] || return 1
+    printf '%s/%s\n' "$DU_SETUP_STATE_DIR" "$key"
+}
+
+state_get() {
+    local key="$1" fallback="${2:-}" path
+    path=$(state_path "$key") || return 1
+    if [[ -r "$path" ]]; then
+        head -n 1 -- "$path"
+    else
+        printf '%s\n' "$fallback"
+    fi
+}
+
+state_set() {
+    local key="$1" value="$2" path temp
+    path=$(state_path "$key") || return 1
+    temp=$(mktemp "${DU_SETUP_STATE_DIR}/.${key}.XXXXXX")
+    printf '%s\n' "$value" > "$temp"
+    chmod 0600 "$temp"
+    chown root:root "$temp"
+    mv -f -- "$temp" "$path"
+}
+
+normalize_bool() {
+    case "${1,,}" in
+        y|yes|true|1|enabled) printf 'true\n' ;;
+        n|no|false|0|disabled) printf 'false\n' ;;
+        *) return 1 ;;
+    esac
+}
+
+prompt_bool_current() {
+    local prompt="$1" current response suffix
+    current=$(normalize_bool "$2") || return 1
+    if [[ "${NON_INTERACTIVE:-false}" == "true" ]]; then
+        printf '%s\n' "$current"
+        return 0
+    fi
+    [[ "$current" == "true" ]] && suffix="[Y/n]" || suffix="[y/N]"
+    while true; do
+        read -rp "$(printf '%s' "${CYAN}${prompt} ${suffix}: ${NC}")" response
+        if [[ -z "$response" ]]; then
+            printf '%s\n' "$current"
+            return 0
+        fi
+        normalize_bool "$response" && return 0
+        print_error "Please answer yes or no, or press Enter to keep the current value." >&2
+    done
+}
+
+prompt_value_current() {
+    local prompt="$1" current="$2" validator="${3:-}" response
+    if [[ "${NON_INTERACTIVE:-false}" == "true" ]]; then
+        if [[ -z "$current" ]] || { [[ -n "$validator" ]] && ! "$validator" "$current"; }; then
+            print_error "No valid current value exists for non-interactive prompt: $prompt" >&2
+            return 2
+        fi
+        printf '%s\n' "$current"
+        return 0
+    fi
+    while true; do
+        read -rp "$(printf '%s' "${CYAN}${prompt} [${current}]: ${NC}")" response
+        response="${response:-$current}"
+        if [[ -z "$validator" ]] || "$validator" "$response"; then
+            printf '%s\n' "$response"
+            return 0
+        fi
+        print_error "Invalid value: $response" >&2
+    done
+}
+
+is_valid_managed_admin() {
+    local user="$1"
+    [[ -n "$user" ]] && id "$user" >/dev/null 2>&1 &&
+        id -nG "$user" 2>/dev/null | tr ' ' '\n' | grep -qx sudo
+}
+
+discover_managed_admin() {
+    local candidate=""
+    candidate=$(state_get managed_admin "")
+    if is_valid_managed_admin "$candidate"; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+    [[ -n "$candidate" ]] && print_warning "Stored managed administrator '$candidate' is missing or no longer in sudo." >&2
+    if [[ -r "$LEGACY_MANAGED_ADMIN_STATE" ]]; then
+        candidate=$(head -n 1 "$LEGACY_MANAGED_ADMIN_STATE")
+        if is_valid_managed_admin "$candidate"; then
+            state_set managed_admin "$candidate"
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+        print_warning "Legacy managed administrator '$candidate' is no longer valid." >&2
+    fi
+    return 1
+}
+
+install_if_changed() {
+    local source_file="$1" destination="$2" mode="${3:-0644}"
+    local owner="${4:-root}" group="${5:-root}"
+    if [[ -f "$destination" ]] && cmp -s -- "$source_file" "$destination"; then
+        return 1
+    fi
+    install -D -m "$mode" -o "$owner" -g "$group" "$source_file" "$destination"
+    return 0
 }
 
 convert_to_bytes() {
@@ -240,15 +399,11 @@ execute_command() {
 }
 
 # --- Docker Compose Helper ---
-# Checks for 'docker compose' (v2) or 'docker-compose' (v1) and runs the command
+# Requires Docker Compose v2 and runs the command
 run_docker_compose() {
-    if docker compose version >/dev/null 2>&1; then
-        docker compose "$@"
-    elif command -v docker-compose >/dev/null 2>&1; then
-        docker-compose "$@"
-    else
-        print_error "'docker compose' (v2) or 'docker-compose' (v1) not found."
-        print_info "Please install one of them to manage the Nginx container."
+    if ! docker compose version >/dev/null 2>&1; then
+        print_error "Docker Compose v2 ('docker compose') is required."
         return 1
     fi
+    docker compose "$@"
 }

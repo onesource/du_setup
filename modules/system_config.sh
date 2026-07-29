@@ -25,22 +25,17 @@ configure_system() {
     cp /etc/sysctl.conf "$BACKUP_DIR/sysctl.conf.backup" 2>/dev/null || true
 
     print_info "Configuring timezone..."
-    while true; do
-        read -rp "$(printf '%s' "${CYAN}Enter desired timezone (e.g., Europe/London, America/New_York) [Etc/UTC]: ${NC}")" TIMEZONE
-        TIMEZONE=${TIMEZONE:-Etc/UTC}
-        if validate_timezone "$TIMEZONE"; then
-            if [[ $(timedatectl status | grep "Time zone" | awk '{print $3}') != "$TIMEZONE" ]]; then
-                timedatectl set-timezone "$TIMEZONE"
-                print_success "Timezone set to $TIMEZONE."
-                log "Timezone set to $TIMEZONE."
-            else
-                print_info "Timezone already set to $TIMEZONE."
-            fi
-            break
-        else
-            print_error "Invalid timezone. View list with 'timedatectl list-timezones'."
-        fi
-    done
+    local current_timezone
+    current_timezone=$(timedatectl show --property=Timezone --value 2>/dev/null || printf 'Etc/UTC')
+    TIMEZONE=$(prompt_value_current "Desired timezone" "$current_timezone" validate_timezone)
+    if [[ "$TIMEZONE" != "$current_timezone" ]]; then
+        timedatectl set-timezone "$TIMEZONE"
+        print_success "Timezone changed from $current_timezone to $TIMEZONE."
+        log "Timezone changed from $current_timezone to $TIMEZONE."
+    else
+        print_info "Keeping current timezone: $TIMEZONE."
+    fi
+    state_set timezone "$TIMEZONE"
 
     if confirm "Configure system locales interactively?"; then
         dpkg-reconfigure locales
@@ -232,83 +227,88 @@ EOF
     }
 
     run_update_check() {
-        print_section "Checking for Script Updates"
-        local latest_version
+        print_section "Checking for Repository Updates"
+        local latest_version remote_commit archive temp_root extracted parent
+        local install_name backup_path installed_commit="" local_commit="" apply_update
 
-        # Fetch the latest script from GitHub and parse version number from it.
-        if command -v curl >/dev/null 2>&1; then
-            if ! latest_version=$(curl -sL --connect-timeout 10 "$CONFIG_URL" 2>/dev/null | grep '^CURRENT_VERSION=' | head -n 1 | awk -F'"' '{print $2}'); then
-                print_warning "Could not check for updates. Please check your internet connection."
-                log "Update check failed: Could not fetch script from $CONFIG_URL"
-                return
+        command -v curl >/dev/null 2>&1 || {
+            print_warning "curl is unavailable; skipping repository update check."
+            return 0
+        }
+        latest_version=$(curl -fsSL --connect-timeout 10 "$CONFIG_URL" 2>/dev/null |
+            awk -F'"' '/^CURRENT_VERSION=/{print $2; exit}' || true)
+        remote_commit=$(curl -fsSL --connect-timeout 10 "$REPOSITORY_API_URL" 2>/dev/null |
+            awk -F'"' '/"sha"[[:space:]]*:/{print $4; exit}' || true)
+        [[ -n "$latest_version" && "$remote_commit" =~ ^[0-9a-f]{40}$ ]] || {
+            print_warning "Could not determine the remote repository version and commit."
+            return 0
+        }
+
+        if [[ -d "$SCRIPT_DIR/.git" ]]; then
+            local_commit=$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || true)
+            if [[ "$local_commit" == "$remote_commit" ]]; then
+                print_info "Git checkout is current at commit $local_commit."
+            elif [[ -n "$(git -C "$SCRIPT_DIR" status --porcelain 2>/dev/null)" ]]; then
+                print_warning "This is a modified Git worktree; self-update was skipped to preserve local changes."
+            else
+                print_warning "A repository update is available ($latest_version, $remote_commit). Update this Git checkout through Git, review it, then rerun."
             fi
-        else
-            print_warning "curl command not found. Skipping update check."
-            log "Update check failed: curl command not available"
-            return
+            return 0
         fi
 
-        if [[ -z "$latest_version" ]]; then
-            print_warning "Failed to find version number in remote script."
-            log "Update check failed: Could not parse version string from remote script."
-            return
+        [[ -r "$SCRIPT_DIR/.du_setup_commit" ]] && read -r installed_commit < "$SCRIPT_DIR/.du_setup_commit"
+        if [[ "$installed_commit" == "$remote_commit" ]]; then
+            print_info "Installed repository is current at commit $remote_commit."
+            return 0
         fi
+        print_success "Repository update available: $latest_version at commit $remote_commit."
+        apply_update=$(prompt_bool_current "Atomically replace the complete installed repository?" false) || return 1
+        [[ "$apply_update" == "true" ]] || return 0
 
-        local lower_version
-        lower_version=$(printf '%s\n' "$CURRENT_VERSION" "$latest_version" | sort -V | head -n 1)
-
-        if [[ "$lower_version" == "$CURRENT_VERSION" && "$CURRENT_VERSION" != "$latest_version" ]]; then
-            print_success "A new version ($latest_version) is available!"
-
-            if ! confirm "Would you like to update to version $latest_version now?"; then
-                return
-            fi
-
-            local temp_dir
-            if ! temp_dir=$(mktemp -d); then
-                print_error "Failed to create temporary directory. Update aborted."
-                exit 1
-            fi
-            trap 'rm -rf -- "$temp_dir"' EXIT
-
-            local temp_script="$temp_dir/du_setup_modular.sh"
-            local temp_checksum="$temp_dir/checksum.sha256"
-
-            print_info "Downloading new script version..."
-            if ! curl -sL "$SCRIPT_URL" -o "$temp_script"; then
-                print_error "Failed to download new script. Update aborted."
-                exit 1
-            fi
-
-            print_info "Downloading checksum..."
-            if ! curl -sL "$CHECKSUM_URL" -o "$temp_checksum"; then
-                print_error "Failed to download checksum file. Update aborted."
-                exit 1
-            fi
-
-            print_info "Verifying checksum..."
-            if ! (cd "$temp_dir" && sha256sum -c "checksum.sha256" --quiet); then
-                print_error "Checksum verification failed! The downloaded file may be corrupt. Update aborted."
-                exit 1
-            fi
-
-            print_success "Checksum verified successfully."
-
-            if ! mv "$temp_script" "$0"; then
-                print_error "Failed to replace old script file. You may need to do this manually."
-                exit 1
-            fi
-            chmod +x "$0"
-
-            trap - EXIT
-            rm -rf -- "$temp_dir"
-
-            print_success "Update successful. Please run the script again to use the new version."
-            exit 0
-        else
-            print_info "You are running the latest version ($CURRENT_VERSION)."
-            log "No new version found. Current: $CURRENT_VERSION, Latest: $latest_version"
+        parent=$(dirname "$SCRIPT_DIR")
+        install_name=$(basename "$SCRIPT_DIR")
+        temp_root=$(mktemp -d "$parent/.du-setup-update.XXXXXX")
+        archive="$temp_root/repository.tar.gz"
+        if ! curl -fL "${REPOSITORY_ARCHIVE_BASE}/${remote_commit}.tar.gz" -o "$archive"; then
+            rm -rf -- "$temp_root"
+            return 1
         fi
+        if tar -tzf "$archive" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
+            print_error "Repository archive contains an unsafe path."
+            rm -rf -- "$temp_root"
+            return 1
+        fi
+        tar -xzf "$archive" -C "$temp_root"
+        extracted=$(find "$temp_root" -mindepth 1 -maxdepth 1 -type d -name 'du_setup-*' | head -n1)
+        [[ -n "$extracted" && -f "$extracted/du_setup_modular.sh" ]] || {
+            print_error "Downloaded repository is incomplete."
+            rm -rf -- "$temp_root"
+            return 1
+        }
+        while IFS= read -r -d '' script; do
+            bash -n "$script" || {
+                print_error "Downloaded repository failed syntax validation: $script"
+                rm -rf -- "$temp_root"
+                return 1
+            }
+        done < <(find "$extracted" -type f -name '*.sh' -print0)
+        printf '%s\n' "$remote_commit" > "$extracted/.du_setup_commit"
+
+        backup_path="$parent/${install_name}.previous.$(date +%Y%m%d_%H%M%S)"
+        if ! mv -- "$SCRIPT_DIR" "$backup_path"; then
+            rm -rf -- "$temp_root"
+            return 1
+        fi
+        if ! mv -- "$extracted" "$SCRIPT_DIR"; then
+            mv -- "$backup_path" "$SCRIPT_DIR" || true
+            print_error "Atomic repository replacement failed and rollback was attempted."
+            rm -rf -- "$temp_root"
+            return 1
+        fi
+        rm -rf -- "$temp_root"
+        print_success "Complete repository updated atomically to commit $remote_commit."
+        print_info "Previous repository retained at $backup_path. Rerun the installer."
+        exit 0
     }
 
     check_dependencies() {
@@ -333,80 +333,71 @@ EOF
 
     collect_config() {
         print_section "Configuration Setup"
-        while true; do
-            read -rp "$(printf '%s' "${CYAN}Enter username for new admin user: ${NC}")" USERNAME
-            if validate_username "$USERNAME"; then
-                if id "$USERNAME" &>/dev/null; then
-                    print_warning "User '$USERNAME' already exists."
-                    if confirm "Use this existing user?"; then USER_EXISTS=true; break; fi
-                else
-                    USER_EXISTS=false; break
+        local discovered_admin="" current_hostname current_pretty
+
+        if discovered_admin=$(discover_managed_admin); then
+            USERNAME=$(prompt_value_current "Managed administrator" "$discovered_admin" validate_username)
+        elif [[ "${NON_INTERACTIVE:-false}" == "true" ]]; then
+            print_error "No managed administrator exists; supply one during an interactive first run."
+            return 1
+        else
+            while true; do
+                read -rp "$(printf '%s' "${CYAN}Enter username for the managed administrator: ${NC}")" USERNAME
+                if validate_username "$USERNAME"; then
+                    if id "$USERNAME" &>/dev/null; then
+                        print_warning "User '$USERNAME' already exists and will be reconciled as the managed administrator."
+                        USER_EXISTS=true
+                    else
+                        USER_EXISTS=false
+                    fi
+                    break
                 fi
-            else
-                print_error "Invalid username. Use lowercase letters, numbers, hyphens, underscores (max 32 chars)."
-            fi
-        done
-        while true; do
-            read -rp "$(printf '%s' "${CYAN}Enter server hostname: ${NC}")" SERVER_NAME
-            if validate_hostname "$SERVER_NAME"; then break; else print_error "Invalid hostname."; fi
-        done
-        read -rp "$(printf '%s' "${CYAN}Enter a 'pretty' hostname (optional): ${NC}")" PRETTY_NAME
-        [[ -z "$PRETTY_NAME" ]] && PRETTY_NAME="$SERVER_NAME"
-        # Try to detect current SSH port with error handling
-        if command -v ss >/dev/null 2>&1; then
-            PREVIOUS_SSH_PORT=$(ss -tlpn 2>/dev/null | grep sshd | head -n 1 | grep -o ':[0-9]*' | sed 's/://' | head -n 1 || echo "")
-            # Fallback if necessary (rare cases)
-            if [[ -z "$PREVIOUS_SSH_PORT" ]] && [ -f /etc/ssh/sshd_config ]; then
-                PREVIOUS_SSH_PORT=$(grep -E "^Port\s+[0-9]+" /etc/ssh/sshd_config | grep -oP "\d+" | head -n 1 || echo "")
-            fi
-            # Additional fallback for Ubuntu 24.04+ with socket activation
-            if [[ -z "$PREVIOUS_SSH_PORT" ]] && [ -f /etc/systemd/system/ssh.socket.d/port.conf ]; then
-                PREVIOUS_SSH_PORT=$(grep "ListenStream=" /etc/systemd/system/ssh.socket.d/port.conf | tail -n 1 | grep -o '[0-9]*' || echo "")
-            fi
-        else
-            PREVIOUS_SSH_PORT=""
+                print_error "Invalid username. Use lowercase letters, numbers, hyphens, or underscores (max 32)."
+            done
         fi
-        local PROMPT_DEFAULT_PORT=${PREVIOUS_SSH_PORT:-2222}
-        [[ -z "$PRETTY_NAME" ]] && PRETTY_NAME="$SERVER_NAME"
-        while true; do
-            read -rp "$(printf '%s' "${CYAN}Enter custom SSH port (1024-65535) [$PROMPT_DEFAULT_PORT]: ${NC}")" SSH_PORT
-            SSH_PORT=${SSH_PORT:-$PROMPT_DEFAULT_PORT}
-            if validate_port "$SSH_PORT" || [[ -n "$PREVIOUS_SSH_PORT" && "$SSH_PORT" == "$PREVIOUS_SSH_PORT" ]]; then break; else print_error "Invalid port. Choose a port between 1024-65535."; fi
-        done
+        id "$USERNAME" &>/dev/null && USER_EXISTS=true || USER_EXISTS=false
 
-        # Detect server IPs with error handling
+        current_hostname=$(hostnamectl --static 2>/dev/null || hostname)
+        SERVER_NAME=$(prompt_value_current "Server hostname" "$current_hostname" validate_hostname)
+        current_pretty=$(hostnamectl --pretty 2>/dev/null || true)
+        current_pretty=${current_pretty:-$current_hostname}
+        PRETTY_NAME=$(prompt_value_current "Pretty hostname" "$current_pretty")
+
+        PREVIOUS_SSH_PORT=$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2; exit}' || true)
+        if [[ -z "$PREVIOUS_SSH_PORT" ]] && command -v ss >/dev/null 2>&1; then
+            PREVIOUS_SSH_PORT=$(ss -H -tlpn 2>/dev/null | awk '/sshd/ {sub(/^.*:/, "", $4); print $4; exit}' || true)
+        fi
+        PREVIOUS_SSH_PORT=${PREVIOUS_SSH_PORT:-22}
+        SSH_PORT=$(prompt_value_current "SSH port" "$PREVIOUS_SSH_PORT" validate_ssh_port)
+        [[ "$SSH_PORT" == "22" ]] || validate_port "$SSH_PORT" || {
+            print_error "SSH port must be 22 or between 1024 and 65535."
+            return 1
+        }
+
         if command -v curl >/dev/null 2>&1; then
-            SERVER_IP_V4=$(curl -4 -s --connect-timeout 5 https://ifconfig.me 2>/dev/null || echo "unknown")
-            SERVER_IP_V6=$(curl -6 -s --connect-timeout 5 https://ifconfig.me 2>/dev/null || echo "not available")
-        else
-            SERVER_IP_V4="unknown"
-            SERVER_IP_V6="not available"
-        fi
-        if [[ "$SERVER_IP_V4" != "unknown" ]]; then
-            print_info "Detected server IPv4: $SERVER_IP_V4"
-        fi
-        if [[ "$SERVER_IP_V6" != "not available" ]]; then
-            print_info "Detected server IPv6: $SERVER_IP_V6"
+            SERVER_IP_V4=$(curl -4 -fsS --connect-timeout 5 https://ifconfig.me 2>/dev/null || echo "unknown")
+            SERVER_IP_V6=$(curl -6 -fsS --connect-timeout 5 https://ifconfig.me 2>/dev/null || echo "not available")
         fi
 
-        printf '\n%s\n' "${YELLOW}Configuration Summary:${NC}"
-        printf "  %-15s %s\n" "Username:" "$USERNAME"
-        printf "  %-15s %s\n" "Hostname:" "$SERVER_NAME"
-
-        if [[ -n "$PREVIOUS_SSH_PORT" && "$SSH_PORT" != "$PREVIOUS_SSH_PORT" ]]; then
-            printf "  %-15s %s (change from current: %s)\n" "SSH Port:" "$SSH_PORT" "$PREVIOUS_SSH_PORT"
-        else
-            printf "  %-15s %s\n" "SSH Port:" "$SSH_PORT"
+        printf '
+%s
+' "${YELLOW}Configuration Summary:${NC}"
+        printf "  %-15s %s
+" "Username:" "$USERNAME"
+        printf "  %-15s %s
+" "Hostname:" "$SERVER_NAME"
+        printf "  %-15s %s
+" "SSH Port:" "$SSH_PORT"
+        if ! confirm $'
+Apply this desired configuration?' "y"; then
+            print_info "Exiting without changing configuration."
+            exit 0
         fi
 
-        if [[ "$SERVER_IP_V4" != "unknown" ]]; then
-            printf "  %-15s %s\n" "Server IPv4:" "$SERVER_IP_V4"
-        fi
-        if [[ "$SERVER_IP_V6" != "not available" ]]; then
-            printf "  %-15s %s\n" "Server IPv6:" "$SERVER_IP_V6"
-        fi
-        if ! confirm $'\nContinue with this configuration?' "y"; then print_info "Exiting."; exit 0; fi
-        log "Configuration collected: USER=$USERNAME, HOST=$SERVER_NAME, PORT=$SSH_PORT, IPV4=$SERVER_IP_V4, IPV6=$SERVER_IP_V6"
+        state_set server_name "$SERVER_NAME"
+        state_set pretty_name "$PRETTY_NAME"
+        state_set ssh_port "$SSH_PORT"
+        log "Configuration collected: USER=$USERNAME, HOST=$SERVER_NAME, PORT=$SSH_PORT"
     }
 
     install_packages() {
@@ -424,16 +415,12 @@ EOF
         print_info "Installing essential packages..."
         if ! apt-get install -y -qq \
             ufw fail2ban unattended-upgrades chrony \
-            rsync wget vim htop iotop nethogs netcat-traditional ncdu \
+            rsync wget vim htop iotop nethogs netcat-openbsd ncdu \
             tree rsyslog cron jq gawk coreutils perl skopeo git \
             ssh openssh-client openssh-server; then
             print_error "Failed to install one or more essential packages."
             exit 1
         fi
-
-        # Suppress Python SyntaxWarning messages during package installation
-        print_info "Configuring Python warnings suppression..."
-        export PYTHONWARNINGS="ignore::SyntaxWarning"
 
         print_success "Essential packages installed."
         log "Package installation completed."

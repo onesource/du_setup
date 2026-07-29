@@ -7,9 +7,9 @@
 
 -----
 
-**Version:** v0.74.2_modular
+**Version:** v0.75.0_modular
 
-**Last Updated:** 2025-11-08
+**Last Updated:** 2026-07-28
 
 **Compatible With:**
 
@@ -18,9 +18,20 @@
 
 ## Overview
 
-This script automates the initial setup and security hardening of a fresh Debian or Ubuntu server. It is **idempotent**, **safe**, and suitable for **production environments**, providing a secure baseline for further customization. The script runs interactively, guiding users through critical choices while automating essential security and setup tasks.
+This repository implements a first-run installer and a declarative reconciler for Debian and Ubuntu servers. On later runs it observes live state, presents current values as defaults, and changes settings only after an explicit new choice. Treat releases as production candidates only after reviewing the generated plan and testing remote-access changes on a disposable server.
 
-### v0.74-modular - Modular Architecture
+## Reconciliation and ownership model
+
+- Live system state supplies prompt defaults; pressing Enter preserves it.
+- Explicit intent is stored under `/etc/du-setup/state/` in root-owned files.
+- Secrets are stored separately under `/etc/du-setup/credentials/`.
+- The managed administrator is stored as `managed_admin`, migrated from `/root/.du_setup_managed_user`, and revalidated against the live account and sudo group every run.
+- Files headed `MANAGED BY du_setup` may be overwritten. Put application-specific settings in separate include/snippet files.
+- Installed-but-disabled optional services are treated as intentionally disabled and reported with instructions to opt back in.
+- `--quiet` controls output only. `--non-interactive` keeps valid observed values and fails closed when first-run input is required.
+
+
+### v0.75-modular - Declarative Reconciler Architecture
 
 Version 0.74-modular introduces a significant architectural improvement with a modular design that separates functionality into distinct components:
 
@@ -31,7 +42,7 @@ Version 0.74-modular introduces a significant architectural improvement with a m
 * **Enhanced Testing**: Modular structure allows for better unit testing of individual components
 * **Easier Customization**: Users can now selectively enable/disable or modify specific modules
 
-The modular version maintains full compatibility with the original script's functionality while providing a more maintainable and extensible codebase.
+The modular version deliberately owns generated snippets and state; direct edits to du_setup-managed files are not a supported compatibility path.
 
 -----
 
@@ -41,6 +52,7 @@ The modular version maintains full compatibility with the original script's func
 * **SSH Hardening**: Configures a custom SSH port, enforces key-based authentication, and applies security best practices.
 * **Firewall Configuration**: Sets up UFW with secure defaults and customizable rules.
 * **Intrusion Prevention**: Installs and configures **Fail2Ban** to block malicious IPs.
+* **Host Intrusion Detection**: Optionally installs a manager-only **Wazuh** server and keeps its custom configuration isolated and validation-gated.
 * **Kernel Hardening**: Optionally applies a set of recommended `sysctl` security settings to harden the kernel against common network and memory-related threats.
 * **Automated Security Updates**: Enables `unattended-upgrades` for automatic security patches.
 * **System Stability**: Configures NTP time synchronization with `chrony` and optional swap file setup for low-RAM systems.
@@ -72,14 +84,22 @@ The modular version maintains full compatibility with the original script's func
   * Extended kernel hardening with AMD EPYC optimizations
 * **Safety First**: Backs up critical configuration files before modification, stored in `/root/setup_harden_backup_*`.
 * **Optional Software**: Offers interactive installation of:
-  * Docker & Docker Compose
+  * Docker & Docker Compose v2
   * Tailscale (Mesh VPN)
   * Nginx Web Server (containerized or host-based)
   * Advanced security tools (AIDE)
 * **Comprehensive Logging**: Logs all actions to `/var/log/du_setup_*.log`.
-* **Automation-Friendly**: Supports `--quiet` mode for automated provisioning.
+* **Automation Safety**: `--quiet` never grants consent; `--non-interactive` preserves valid detected state and fails closed when required input is missing.
 
 -----
+
+## Important operational boundaries
+
+- Docker Compose v2 (`docker compose`) is required; Compose v1 is unsupported.
+- Docker-published ports require Docker-aware firewall review because they do not follow ordinary UFW INPUT handling.
+- Wazuh is manager-only. Use it when this host forwards to an external Wazuh indexer/dashboard; for a single Netcup host without external analytics, Fail2ban, auditd, and AIDE are the lighter default.
+- Database application access rules are never replaced. Native managed settings use dedicated includes; container database configuration remains application-owned.
+- The complete repository self-updater validates and swaps an installed non-Git tree atomically. It refuses to overwrite dirty Git worktrees.
 
 ## Installation & Usage
 
@@ -94,9 +114,10 @@ The modular version maintains full compatibility with the original script's func
 
 ### 1. Download & Prepare Script
 
-#### Modular Script (v0.74-modular)
+#### Modular Script (v0.75-modular)
 ```bash
-wget https://raw.githubusercontent.com/onesource/du_setup/refs/heads/main/du_setup_modular.sh
+git clone https://github.com/onesource/du_setup.git
+cd du_setup
 chmod +x du_setup_modular.sh
 ```
 
@@ -106,7 +127,7 @@ chmod +x du_setup_modular.sh
 
 To ensure the script has not been altered, you can verify its SHA256 checksum.
 
-#### For Modular Script (v0.74-modular)
+#### For Modular Script (v0.75-modular)
 
 ```bash
 # Download the official checksum file
@@ -136,11 +157,15 @@ For the modular script:
 sudo -E ./du_setup_modular.sh
 ```
 
-#### Quiet Mode (For Automation)
+#### Quiet and non-interactive modes
+
+`--quiet` suppresses informational output but still prompts. `--non-interactive` never invents missing first-run values; use it only after an interactive run has established required state.
+
 
 For the modular script:
 ```bash
 sudo -E ./du_setup_modular.sh --quiet
+sudo -E ./du_setup_modular.sh --non-interactive
 ```
 
 > **Warning**: The script pauses to verify SSH access on the new port before disabling old access methods. **Test the new SSH connection from a separate terminal before proceeding!**
@@ -155,7 +180,7 @@ sudo -E ./du_setup_modular.sh --quiet
 | :--- | :--- |
 | **Provider Package Cleanup** | Detects and optionally removes cloud provider packages, monitoring agents, and default provisioning users to reduce attack surface and unnecessary services. |
 | **System Compatibility Checks** | Verifies OS compatibility, root privileges, and internet connectivity. |
-| **Package Management** | Verifies root privileges, OS version compatibility, and internet connectivity. Prevents running on unsupported environments. |
+| **Package Management** | Updates package indexes, upgrades installed packages, and ensures the declared base package set is installed. |
 | **Setup User Creation & Management**| Creates or uses an existing admin user with optional SSH key setup and strong password enforcement. Includes marker file for cleanup exclusion. |
 | **SSH Hardening and Rollback** | Disables root login, configures key-based authentication, sets custom SSH port, and supports rollback of SSH configuration if connectivity fails. |
 | **Firewall Setup** | Configures UFW to deny incoming traffic by default, allowing specific user-defined ports. |
@@ -163,13 +188,13 @@ sudo -E ./du_setup_modular.sh --quiet
 | **Auto-Updates Setup** | Enables and configures `unattended-upgrades` for automatic security patches. |
 | **Time Sync Setup** | Ensures `chrony` is active for accurate network time synchronization. |
 | **Kernel and Sysctl Hardening** | Optional improvements to kernel parameters to mitigate common network attacks and improve system hardening. |
-| **Docker Install** | Installs Docker Engine and Docker Compose, then adds the admin user to the `docker` group. |
+| **Docker Install** | Installs Docker Engine and Docker Compose v2, merges du_setup daemon keys into valid existing JSON, then adds the admin user to the `docker` group. |
 | **Tailscale Setup** | Installs Tailscale and connects to a mesh network using a pre-auth key, with optional advanced flags. |
 | **Automated Remote Backup**| Sets up cron-driven `rsync` backup script to remote SSH servers, integrates with notifications and performs backup verification. |
 | **Swap File Setup** | Creates an optional swap file with tuned `swappiness` and `vfs_cache_pressure` settings. |
 | **Security Auditing** | Runs optional **Lynis** and **debsecan** vulnerability audits and logs the results for review. |
 | **Logging and Reporting** | Logs all actions and generates a detailed report of setup and cleanup in `/var/log` and backup directories. Saves timestamped backups of modified configuration files in `/root/setup_harden_backup_*`. |
-| **Cleanup & Maintenance** | Performs `autoremove` and `autoclean` of unused packages and services after setup or cleanup phases. |
+| **Cleanup & Maintenance** | Reports final service state and reloads systemd; package removal occurs only through the separately confirmed provider-cleanup workflow. |
 | **Final Summary** | Generates a detailed report of all changes and saves it to `/var/log/du_setup_report_*.txt`. |
 
 -----

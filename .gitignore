@@ -48,3 +48,18 @@ deploy_from_github.sh
 shellcheck_report.md
 .codacy.yml
 .codacy
+
+# Local AI-agent metadata and instructions
+/.codex/
+/.agents/
+/gemini.md
+
+# Local design/review notes and scratch code
+/plans/
+/modules/candelete
+
+# Generated local analysis and updater artifacts
+/*.sarif
+/results-*.sarif
+/.du_setup_commit
+/NUL

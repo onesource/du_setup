@@ -11,17 +11,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib/utils.sh"
 
 # --- Final Cleanup Function ---
 final_cleanup() {
-    print_section "Final System Cleanup"
-    print_info "Running final system update and cleanup..."
-    if ! apt-get update -qq; then
-        print_warning "Failed to update package lists during final cleanup."
-    fi
-    if ! apt-get upgrade -y -qq || ! apt-get --purge autoremove -y -qq || ! apt-get autoclean -y -qq; then
-        print_warning "Final system cleanup failed on one or more commands."
-    fi
+    print_section "Final Reconciliation Check"
+    print_info "Package maintenance already ran during package reconciliation; no purge/autoremove is performed automatically."
     systemctl daemon-reload
-    print_success "Final system update and cleanup complete."
-    log "Final system cleanup completed."
+    print_success "Final systemd reload complete."
+    log "Final reconciliation check completed."
 }
 
 # --- Generate Summary Function ---
@@ -48,46 +42,56 @@ generate_summary() {
         fi
     done
 
-    # Check OSSEC status
-    if command -v /var/ossec/bin/ossec-control >/dev/null 2>&1; then
-        if /var/ossec/bin/ossec-control status | grep -q "is running"; then
-            printf "  %-20s ${GREEN}✓ Active${NC}\n" "ossec"
+    # Optional services are failures only when the persisted desired state is
+    # enabled. Installed-but-disabled is reported as an intentional choice.
+    local wazuh_desired docker_desired tailscale_desired
+    wazuh_desired=$(state_get component.wazuh false)
+    docker_desired=$(state_get component.docker false)
+    tailscale_desired=$(state_get component.tailscale false)
+
+    if [[ -x "$WAZUH_CONTROL" ]]; then
+        if "$WAZUH_CONTROL" status | grep -q "is running"; then
+            printf "  %-20s ${GREEN}Active${NC}\n" "wazuh-manager"
+        elif [[ "$wazuh_desired" == "false" ]]; then
+            printf "  %-20s ${YELLOW}Installed, intentionally disabled${NC}\n" "wazuh-manager"
         else
-            printf "  %-20s ${RED}✗ INACTIVE${NC}\n" "ossec"
-            FAILED_SERVICES+=("ossec")
+            printf "  %-20s ${RED}INACTIVE${NC}\n" "wazuh-manager"
+            FAILED_SERVICES+=("wazuh-manager")
         fi
     else
-        printf "  %-20s ${RED}✗ Not Installed${NC}\n" "ossec"
+        printf "  %-20s ${YELLOW}Not installed (optional)${NC}\n" "wazuh-manager"
     fi
     if ufw status | grep -q "Status: active"; then
-        printf "  %-20s ${GREEN}✓ Active${NC}\n" "ufw (firewall)"
+        printf "  %-20s ${GREEN}Active${NC}\n" "ufw (firewall)"
     else
-        printf "  %-20s ${RED}✗ INACTIVE${NC}\n" "ufw (firewall)"
+        printf "  %-20s ${RED}INACTIVE${NC}\n" "ufw (firewall)"
         FAILED_SERVICES+=("ufw")
     fi
     if command -v docker >/dev/null 2>&1; then
         if systemctl is-active --quiet docker; then
-            printf "  %-20s ${GREEN}✓ Active${NC}\n" "docker"
+            printf "  %-20s ${GREEN}Active${NC}\n" "docker"
+        elif [[ "$docker_desired" == "false" ]]; then
+            printf "  %-20s ${YELLOW}Installed, intentionally disabled${NC}\n" "docker"
         else
-            printf "  %-20s ${RED}✗ INACTIVE${NC}\n" "docker"
+            printf "  %-20s ${RED}INACTIVE${NC}\n" "docker"
             FAILED_SERVICES+=("docker")
         fi
     fi
     if command -v tailscale >/dev/null 2>&1; then
         if systemctl is-active --quiet tailscaled && tailscale ip >/dev/null 2>&1; then
-            printf "  %-20s ${GREEN}✓ Active & Connected${NC}\n" "tailscaled"
+            printf "  %-20s ${GREEN}Active and connected${NC}\n" "tailscaled"
             tailscale ip 2>/dev/null > /tmp/tailscale_ips.txt || true
+        elif [[ "$tailscale_desired" == "false" ]]; then
+            printf "  %-20s ${YELLOW}Installed, intentionally disabled${NC}\n" "tailscaled"
+            TS_COMMAND=""
         else
-            if grep -q "Tailscale connection failed: tailscale up" "$LOG_FILE"; then
-                printf "  %-20s ${RED}✗ INACTIVE (Connection Failed)${NC}\n" "tailscaled"
-                FAILED_SERVICES+=("tailscaled")
-                TS_COMMAND=$(grep "Tailscale connection failed: tailscale up" "$LOG_FILE" | tail -1 | sed 's/.*Tailscale connection failed: //')
-                TS_COMMAND=${TS_COMMAND:-""}
-            else
-                printf "  %-20s ${YELLOW}⚠ Installed but not configured${NC}\n" "tailscaled"
-                TS_COMMAND=""
-            fi
+            printf "  %-20s ${RED}INACTIVE or disconnected${NC}\n" "tailscaled"
+            FAILED_SERVICES+=("tailscaled")
+            TS_COMMAND="sudo tailscale up"
         fi
+    fi
+    if [[ "$wazuh_desired" == "false" || "$docker_desired" == "false" || "$tailscale_desired" == "false" ]]; then
+        printf '%s\n' "  Re-enable an optional service by rerunning du_setup and answering yes for that component."
     fi
     if [[ "${AUDIT_RAN:-false}" == true ]]; then
         printf "  %-20s ${GREEN}✓ Performed${NC}\n" "Security Audit"
@@ -123,11 +127,10 @@ generate_summary() {
         BACKUP_DEST=$(grep "^REMOTE_DEST=" /root/run_backup.sh | cut -d'"' -f2 || echo "Unknown")
         BACKUP_PORT=$(grep "^SSH_PORT=" /root/run_backup.sh | cut -d'"' -f2 || echo "Unknown")
         REMOTE_BACKUP_PATH=$(grep "^REMOTE_PATH=" /root/run_backup.sh | cut -d'"' -f2 || echo "Unknown")
-        if grep -q "NTFY_URL=" /root/run_backup.sh && ! grep -q 'NTFY_URL=""' /root/run_backup.sh; then
-            NOTIFICATION_STATUS="ntfy"
-        elif grep -q "DISCORD_WEBHOOK=" /root/run_backup.sh && ! grep -q 'DISCORD_WEBHOOK=""' /root/run_backup.sh; then
-            NOTIFICATION_STATUS="Discord"
-        fi
+        case "$(grep '^NOTIFICATION_SETUP=' /root/run_backup.sh | cut -d'"' -f2)" in
+            ntfy) NOTIFICATION_STATUS="ntfy" ;;
+            discord) NOTIFICATION_STATUS="Discord" ;;
+        esac
         printf '%s\n' "  Remote Backup:      ${GREEN}Enabled${NC}"
         printf "    %-17s%s\n" "- Backup Script:" "/root/run_backup.sh"
         printf "    %-17s%s\n" "- Destination:" "$BACKUP_DEST"
@@ -210,8 +213,8 @@ generate_summary() {
     printf "  %-28s ${CYAN}%s${NC}\n" "- Time sync:" "chronyc tracking"
     printf "  %-28s ${CYAN}%s${NC}\n" "- Fail2Ban sshd jail:" "sudo fail2ban-client status sshd"
     printf "  %-28s ${CYAN}%s${NC}\n" "- Fail2Ban ufw jail:" "sudo fail2ban-client status ufw-probes"
-    printf "  %-28s ${CYAN}%s${NC}\n" "- OSSEC status:" "sudo /var/ossec/bin/ossec-control status"
-    printf "  %-28s ${CYAN}%s${NC}\n" "- OSSEC alerts:" "sudo tail -f /var/ossec/logs/alerts/alerts.log"
+    printf "  %-28s ${CYAN}%s${NC}\n" "- Wazuh status:" "sudo /var/ossec/bin/ossec-control status"
+    printf "  %-28s ${CYAN}%s${NC}\n" "- Wazuh alerts:" "sudo tail -f /var/ossec/logs/alerts/alerts.log"
     printf "  %-28s ${CYAN}%s${NC}\n" "- Rootkit scan:" "sudo chkrootkit && sudo rkhunter --check"
     printf "  %-28s ${CYAN}%s${NC}\n" "- Swap status:" "sudo swapon --show && free -h"
     printf "  %-28s ${CYAN}%s${NC}\n" "- Kernel settings:" "sudo sysctl fs.protected_hardlinks kernel.yama.ptrace_scope"
@@ -244,17 +247,17 @@ generate_summary() {
         print_warning "ACTION REQUIRED: Ensure root SSH key (/root/.ssh/id_ed25519.pub) is copied to backup destination."
     fi
 
-    print_warning "A reboot is required to apply all changes cleanly."
-    if [[ $VERBOSE == true ]]; then
-        if confirm "Reboot now?" "y"; then
+    if [[ -f /var/run/reboot-required ]]; then
+        print_warning "The operating system reports that a reboot is required."
+        if confirm "Reboot now?" "n"; then
             print_info "Rebooting, bye!..."
             sleep 3
             reboot
         else
-            print_warning "Please reboot manually with 'sudo reboot'."
+            print_warning "Please reboot manually with 'sudo reboot' when convenient."
         fi
     else
-        print_warning "Quiet mode enabled. Please reboot manually with 'sudo reboot'."
+        print_info "No reboot is currently required."
     fi
 
     ) | tee -a "$REPORT_FILE"

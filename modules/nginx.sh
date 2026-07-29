@@ -13,12 +13,19 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib/utils.sh"
 
 # --- Nginx Installation Function ---
 install_nginx() {
-    if ! confirm "Install Nginx web server (Optional)?"; then
-        print_info "Skipping Nginx installation."
-        log "Nginx installation skipped by user."
+    local installed=false enabled=false desired
+    if command -v nginx >/dev/null 2>&1 || docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx nginx; then
+        installed=true
+    fi
+    if systemctl is-active --quiet nginx 2>/dev/null || docker ps --format '{{.Names}}' 2>/dev/null | grep -qx nginx; then
+        enabled=true
+    fi
+    desired=$(prompt_component_desired nginx "Nginx" "$installed" "$enabled") || return 1
+    state_set component.nginx "$desired"
+    if [[ "$desired" != "true" ]]; then
+        print_info "Nginx will remain uninstalled or disabled."
         return 0
     fi
-
     print_section "Nginx Installation"
 
     # Check if Docker is available (required for containerized)
@@ -57,17 +64,31 @@ install_nginx() {
 
     # Install if no existing setup
     if [[ "$container_exists" == "false" ]]; then
-        # Ask for installation method
-        printf '%s\n' "${CYAN}Choose installation method:${NC}"
-        printf '  1) Containerized (recommended) - Docker container with Nginx%s\n' "$NC"
-        printf '  2) Host-based - Direct installation on the system%s\n' "$NC"
-
-        local method=1
-        read -rp "$(printf '%s\n' "${CYAN}Enter choice (1-2) ${NC}")" method
-        [[ "$method" =~ ^[2]$ ]] && method=2
-        case $method in
-            1) install_nginx_container ;;
-            2) install_nginx_host ;;
+        local backend
+        backend=$(state_get nginx.backend container)
+        if [[ "$backend" != "container" && "$backend" != "host" ]]; then
+            backend=container
+        fi
+        if [[ "${NON_INTERACTIVE:-false}" != "true" ]]; then
+            printf '%s
+' "${CYAN}Choose Nginx backend (current/default: $backend):${NC}"
+            printf '  1) Container backend (recommended; requires Compose v2)
+'
+            printf '  2) Host backend
+'
+            local method
+            read -rp "$(printf '%s' "${CYAN}Enter choice [${backend}]: ${NC}")" method
+            case "$method" in
+                1|container) backend=container ;;
+                2|host) backend=host ;;
+                '') ;;
+                *) print_error "Invalid Nginx backend."; return 1 ;;
+            esac
+        fi
+        state_set nginx.backend "$backend"
+        case "$backend" in
+            container) install_nginx_container ;;
+            host) install_nginx_host ;;
         esac
     fi
 
@@ -135,6 +156,11 @@ configure_nginx_security() {
 
 # --- Containerized Nginx Installation ---
 install_nginx_container() {
+    if ! docker compose version >/dev/null 2>&1; then
+        print_error "The container Nginx backend requires Docker Compose v2."
+        return 1
+    fi
+    state_set nginx.backend container
     print_info "Installing containerized Nginx (nginxinc/nginx-unprivileged:alpine)..."
 
     # Check if Docker is available
@@ -641,6 +667,7 @@ EOF
 
 # --- Host-based Nginx Installation ---
 install_nginx_host() {
+    state_set nginx.backend host
     print_info "Installing Nginx on the host..."
 
     # Unified setup FIRST

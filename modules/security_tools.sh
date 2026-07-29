@@ -17,6 +17,7 @@ configure_fail2ban() {
     # Define content of config file.
     local UFW_PROBES_CONFIG
     UFW_PROBES_CONFIG=$(cat <<'EOF'
+# MANAGED BY du_setup. Manual edits may be overwritten on the next run.
 [Definition]
 # This regex looks for standard "[UFW BLOCK]" message in /var/log/ufw.log
 failregex = \[UFW BLOCK\] IN=.* OUT=.* SRC=<HOST>
@@ -26,6 +27,7 @@ EOF
 
     local JAIL_LOCAL_CONFIG
     JAIL_LOCAL_CONFIG=$(cat <<EOF
+# MANAGED BY du_setup. Manual edits may be overwritten on the next run.
 [DEFAULT]
 ignoreip = 127.0.0.1/8 ::1
 bantime = 1d
@@ -48,7 +50,7 @@ EOF
 )
 
     local UFW_FILTER_PATH="/etc/fail2ban/filter.d/ufw-probes.conf"
-    local JAIL_LOCAL_PATH="/etc/fail2ban/jail.local"
+    local JAIL_LOCAL_PATH="/etc/fail2ban/jail.d/99-du-setup.local"
 
     # --- Idempotency Check ---
     # This checks if on-disk files are already identical to our desired configuration.
@@ -63,7 +65,7 @@ EOF
     # --- Apply Configuration ---
     # If check above fails, we write correct configuration files.
     print_info "Applying new Fail2Ban configuration..."
-    mkdir -p /etc/fail2ban/filter.d
+    mkdir -p /etc/fail2ban/filter.d /etc/fail2ban/jail.d
     echo "$UFW_PROBES_CONFIG" > "$UFW_FILTER_PATH"
     echo "$JAIL_LOCAL_CONFIG" > "$JAIL_LOCAL_PATH"
 
@@ -135,31 +137,50 @@ EOF
 # --- Auto Updates Configuration Function ---
 configure_auto_updates() {
     print_section "Automatic Security Updates"
-    if confirm "Enable automatic security updates via unattended-upgrades?"; then
-        if ! dpkg -l unattended-upgrades | grep -q ^ii; then
-            print_error "unattended-upgrades package is not installed."
-            exit 1
-        fi
-        # Check for existing unattended-upgrades configuration
-        if [[ -f /etc/apt/apt.conf.d/50unattended-upgrades ]] && grep -q "Unattended-Upgrade::Allowed-Origins" /etc/apt/apt.conf.d/50unattended-upgrades; then
-            print_info "Existing unattended-upgrades configuration found. Verify with 'cat /etc/apt/apt.conf.d/50unattended-upgrades'."
-        fi
-        print_info "Configuring unattended upgrades..."
-        echo "unattended-upgrades unattended-upgrades/enable_auto_updates boolean true" | debconf-set-selections
-        DEBIAN_FRONTEND=noninteractive dpkg-reconfigure -f noninteractive unattended-upgrades
+    local current=false desired periodic=/etc/apt/apt.conf.d/20auto-upgrades
+    if apt-config dump 2>/dev/null | grep -Eq 'APT::Periodic::Unattended-Upgrade[[:space:]]+"1"'; then
+        current=true
+    fi
+    desired=$(prompt_bool_current "Enable automatic security updates?" "$current") || return 1
+    state_set auto_updates "$desired"
+    if [[ "$desired" == "$current" ]]; then
+        print_info "Automatic security update state is unchanged ($current)."
+        return 0
+    fi
+    if [[ "$desired" == "true" ]]; then
+        is_installed unattended-upgrades || DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unattended-upgrades
+        cat > "$periodic" <<'EOF'
+// MANAGED BY du_setup. Manual edits may be overwritten on the next run.
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+EOF
+        systemctl enable --now apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1 || true
         print_success "Automatic security updates enabled."
     else
-        print_info "Skipping automatic security updates."
+        cat > "$periodic" <<'EOF'
+// MANAGED BY du_setup. Manual edits may be overwritten on the next run.
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "0";
+EOF
+        print_success "Automatic installation of security updates disabled; package-list refresh remains enabled."
     fi
-    log "Automatic updates configuration completed."
 }
 
 # --- Kernel Hardening Function ---
 configure_kernel_hardening() {
     print_section "Kernel Parameter Hardening (sysctl)"
-    if ! confirm "Apply recommended kernel security settings (sysctl)?"; then
-        print_info "Skipping kernel hardening."
-        log "Kernel hardening skipped by user."
+    local current=false desired
+    [[ -f /etc/sysctl.d/99-du-hardening.conf ]] && current=true
+    desired=$(prompt_bool_current "Apply du_setup kernel security settings?" "$current") || return 1
+    state_set kernel_hardening "$desired"
+    if [[ "$desired" != "true" ]]; then
+        if [[ "$current" == "true" ]]; then
+            rm -f /etc/sysctl.d/99-du-hardening.conf
+            sysctl --system >/dev/null 2>&1 || true
+            print_success "Removed the du_setup-owned kernel hardening file."
+        else
+            print_info "Kernel hardening remains unmanaged."
+        fi
         return 0
     fi
 

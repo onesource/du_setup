@@ -1,3 +1,5 @@
+> Reconciler update (2026-07-28): current live values are prompt defaults, Enter preserves them, and du_setup-owned files are labeled. See README.md for state ownership, non-interactive behavior, database preservation, and Wazuh manager-only limitations.
+
 ### **Setup**
 - **Environment**: A fresh VM running **Ubuntu 22.04 LTS** (a supported OS) with:
   - Root privileges (`sudo` or direct root access).

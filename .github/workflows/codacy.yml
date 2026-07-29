@@ -32,7 +32,36 @@ jobs:
     steps:
       # Checkout the repository to the GitHub Actions runner
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Reject CRLF shell scripts
+        shell: bash
+        run: |
+          mapfile -t bad_files < <(grep -Il $'\r' -- *.sh lib/*.sh modules/*.sh || true)
+          if (( ${#bad_files[@]} )); then
+            printf 'CRLF shell script: %s\n' "${bad_files[@]}"
+            exit 1
+          fi
+
+      - name: Validate Bash syntax
+        shell: bash
+        run: |
+          for script in du_setup_modular.sh lib/*.sh modules/*.sh; do
+            bash -n "$script"
+          done
+
+      - name: Test reconciler helpers
+        shell: bash
+        run: tests/test_reconciler_helpers.sh
+
+      - name: Run ShellCheck errors gate
+        shell: bash
+        run: shellcheck -x --severity=error du_setup_modular.sh lib/*.sh modules/*.sh
+
+      - name: Report ShellCheck warnings
+        continue-on-error: true
+        shell: bash
+        run: shellcheck -x --severity=warning du_setup_modular.sh lib/*.sh modules/*.sh
 
       - name: Check for non-UTF-8 files
         run: |
@@ -83,7 +112,7 @@ jobs:
 
       # # Execute Codacy Analysis CLI and generate a SARIF output with the security issues identified during the analysis
       # - name: Run Codacy Analysis CLI
-      #   uses: codacy/codacy-analysis-cli-action@master
+      #   uses: codacy/codacy-analysis-cli-action@d43360362776a6789b47b99ae8973510854e2d3d # master, pinned 2026-07-28
       #   with:
       #     # Check https://github.com/codacy/codacy-analysis-cli#project-token to get your project token from your Codacy repository
       #     # You can also omit the token and run the tools that support default configurations
@@ -99,7 +128,7 @@ jobs:
 
       # # Upload the SARIF file generated in the previous step
       # - name: Upload SARIF results file
-      #   uses: github/codeql-action/upload-sarif@v3
+      #   uses: github/codeql-action/upload-sarif@3b0bd1d116c0bde30213346b22d4f634d96a2fb0 # v3
       #   with:
       #     sarif_file: results.sarif
       #     # Use a unique category to avoid conflicts with other security scans
@@ -107,7 +136,7 @@ jobs:
 
       # === Codacy per-tool runs ===
       - name: Run Codacy (Pylint)
-        uses: codacy/codacy-analysis-cli-action@master
+        uses: codacy/codacy-analysis-cli-action@d43360362776a6789b47b99ae8973510854e2d3d # master, pinned 2026-07-28
         with:
           # Check https://github.com/codacy/codacy-analysis-cli#project-token to get your project token from your Codacy repository
           # You can also omit the token and run the tools that support default configurations
@@ -123,14 +152,14 @@ jobs:
 
       # Upload the SARIF file generated in the previous step
       - name: Upload SARIF (Pylint)
-        if: ${{ steps.codacy.outputs.issues_count > 0 }}
-        uses: github/codeql-action/upload-sarif@v3
+        if: ${{ hashFiles('results-pylint.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@3b0bd1d116c0bde30213346b22d4f634d96a2fb0 # v3
         with:
           sarif_file: results-pylint.sarif
           category: codacy-pylint
 
       - name: Run Codacy (ShellCheck)
-        uses: codacy/codacy-analysis-cli-action@master
+        uses: codacy/codacy-analysis-cli-action@d43360362776a6789b47b99ae8973510854e2d3d # master, pinned 2026-07-28
         with:
           # Check https://github.com/codacy/codacy-analysis-cli#project-token to get your project token from your Codacy repository
           # You can also omit the token and run the tools that support default configurations
@@ -146,14 +175,14 @@ jobs:
 
       # Upload the SARIF file generated in the previous step
       - name: Upload SARIF (ShellCheck)
-        if: ${{ steps.codacy.outputs.issues_count > 0 }}
-        uses: github/codeql-action/upload-sarif@v3
+        if: ${{ hashFiles('results-shellcheck.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@3b0bd1d116c0bde30213346b22d4f634d96a2fb0 # v3
         with:
           sarif_file: results-shellcheck.sarif
           category: codacy-shellcheck
 
       - name: Run Codacy (Bandit)
-        uses: codacy/codacy-analysis-cli-action@master
+        uses: codacy/codacy-analysis-cli-action@d43360362776a6789b47b99ae8973510854e2d3d # master, pinned 2026-07-28
         with:
           # Check https://github.com/codacy/codacy-analysis-cli#project-token to get your project token from your Codacy repository
           # You can also omit the token and run the tools that support default configurations
@@ -169,14 +198,14 @@ jobs:
 
       # Upload the SARIF file generated in the previous step
       - name: Upload SARIF (Bandit)
-        if: ${{ steps.codacy.outputs.issues_count > 0 }}
-        uses: github/codeql-action/upload-sarif@v3
+        if: ${{ hashFiles('results-bandit.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@3b0bd1d116c0bde30213346b22d4f634d96a2fb0 # v3
         with:
           sarif_file: results-bandit.sarif
           category: codacy-bandit
 
       - name: Run Codacy (Trivy)
-        uses: codacy/codacy-analysis-cli-action@master
+        uses: codacy/codacy-analysis-cli-action@d43360362776a6789b47b99ae8973510854e2d3d # master, pinned 2026-07-28
         with:
           # Check https://github.com/codacy/codacy-analysis-cli#project-token to get your project token from your Codacy repository
           # You can also omit the token and run the tools that support default configurations
@@ -192,8 +221,8 @@ jobs:
 
       # Upload the SARIF file generated in the previous step
       - name: Upload SARIF (Trivy)
-        if: ${{ steps.codacy.outputs.issues_count > 0 }}
-        uses: github/codeql-action/upload-sarif@v3
+        if: ${{ hashFiles('results-trivy.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@3b0bd1d116c0bde30213346b22d4f634d96a2fb0 # v3
         with:
           sarif_file: results-trivy.sarif
           category: codacy-trivy

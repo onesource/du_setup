@@ -81,659 +81,221 @@ detect_databases() {
 # --- MySQL/MariaDB Hardening Function ---
 harden_mysql() {
     print_section "MySQL/MariaDB Security Hardening"
-
-    if ! confirm "Apply MySQL/MariaDB security hardening?"; then
-        print_info "Skipping MySQL/MariaDB hardening."
-        return 0
-    fi
-
-    # Determine which service is running
-    local mysql_service=""
-    if systemctl is-active --quiet mysql 2>/dev/null; then
-        mysql_service="mysql"
-    elif systemctl is-active --quiet mysqld 2>/dev/null; then
-        mysql_service="mysqld"
-    elif systemctl is-active --quiet mariadb 2>/dev/null; then
-        mysql_service="mariadb"
+    local mysql_service="" desired=true staged config changed=false validator=""
+    systemctl is-active --quiet mysql 2>/dev/null && mysql_service=mysql
+    systemctl is-active --quiet mariadb 2>/dev/null && mysql_service=mariadb
+    [[ -n "$mysql_service" ]] || { print_warning "No active MySQL/MariaDB service found."; return 0; }
+    desired=$(prompt_bool_current "Manage conservative MySQL/MariaDB hardening?" true) || return 1
+    state_set database.mysql.hardening "$desired"
+    [[ "$desired" == "true" ]] || return 0
+    config=/etc/mysql/conf.d/99-du-setup-security.cnf
+    staged=$(mktemp)
+    cat > "$staged" <<'EOF'
+# MANAGED BY du_setup. Manual edits may be overwritten on the next run.
+# Application-specific settings belong in a different conf.d file.
+[mysqld]
+local-infile=0
+skip-show-database=1
+max-connect-errors=100
+# General query logging is intentionally not enabled: it can expose secrets
+# and impose substantial production overhead.
+EOF
+    if command -v mysqld >/dev/null 2>&1; then validator=mysqld; elif command -v mariadbd >/dev/null 2>&1; then validator=mariadbd; fi
+    if [[ -n "$validator" ]]; then
+        mkdir -p /etc/mysql/conf.d
+        local backup=""
+        [[ -f "$config" ]] && { backup=$(mktemp); cp -a "$config" "$backup"; }
+        install -m 0644 -o root -g root "$staged" "$config"
+        if ! "$validator" --verbose --help >/dev/null 2>&1; then
+            print_error "Database server rejected the managed MySQL/MariaDB configuration."
+            [[ -n "$backup" ]] && cp -a "$backup" "$config" || rm -f "$config"
+            rm -f "$backup" "$staged"
+            return 1
+        fi
+        [[ -n "$backup" ]] && cmp -s "$backup" "$config" || changed=true
+        rm -f "$backup"
     else
-        print_error "No MySQL/MariaDB service is running"
+        print_error "Cannot validate MySQL/MariaDB configuration; no file was installed."
+        rm -f "$staged"
         return 1
     fi
-
-    print_info "Securing MySQL/MariaDB installation..."
-
-    # Run mysql_secure_installation if available
-    if command -v mysql_secure_installation >/dev/null 2>&1; then
-        print_info "Running mysql_secure_installation..."
-        # Note: This is interactive, so we'll provide guidance instead
-        print_warning "Please run 'mysql_secure_installation' manually to:"
-        print_info "  - Set root password"
-        print_info "  - Remove anonymous users"
-        print_info "  - Disallow remote root login"
-        print_info "  - Remove test database"
-        print_info "  - Reload privilege tables"
-    else
-        print_warning "mysql_secure_installation not found. Manual configuration required."
-    fi
-
-    # Create secure MySQL configuration
-    local mysql_conf="/etc/mysql/conf.d/security.cnf"
-    if [[ ! -f "$mysql_conf" ]]; then
-        print_info "Creating secure MySQL configuration..."
-        mkdir -p /etc/mysql/conf.d
-
-        cat > "$mysql_conf" <<'EOF'
-[mysqld]
-# Security enhancements
-skip-show-database = 1
-local-infile = 0
-
-# Logging for audit
-general_log = 1
-general_log_file = /var/log/mysql/general.log
-log_error = /var/log/mysql/error.log
-slow_query_log = 1
-slow_query_log_file = /var/log/mysql/slow.log
-long_query_time = 2
-
-# Connection security
-max_connect_errors = 10
-max_user_connections = 100
-
-# SSL/TLS (if certificates are available)
-# require_secure_transport = ON
-# ssl-ca = /etc/mysql/ssl/ca.pem
-# ssl-cert = /etc/mysql/ssl/server-cert.pem
-# ssl-key = /etc/mysql/ssl/server-key.pem
-EOF
-
-        # Restart MySQL service
-        print_info "Restarting MySQL service..."
+    rm -f "$staged"
+    if [[ "$changed" == "true" ]]; then
         systemctl restart "$mysql_service"
-
-        if systemctl is-active --quiet "$mysql_service"; then
-            print_success "MySQL/MariaDB security configuration applied"
-        else
-            print_error "MySQL/MariaDB service failed to restart"
-            FAILED_SERVICES+=("$mysql_service")
-        fi
+        systemctl is-active --quiet "$mysql_service" || return 1
     else
-        print_info "MySQL security configuration already exists"
+        print_info "MySQL/MariaDB hardening already matches desired state."
     fi
-
-    log "MySQL/MariaDB hardening completed"
 }
 
 # --- PostgreSQL Security Function ---
 harden_postgresql() {
     print_section "PostgreSQL Security Hardening"
-
-    if ! confirm "Apply PostgreSQL security hardening?"; then
-        print_info "Skipping PostgreSQL hardening."
+    local desired=true pg_conf pg_hba conf_dir managed staged backup="" changed=false
+    desired=$(prompt_bool_current "Manage conservative PostgreSQL hardening?" true) || return 1
+    state_set database.postgresql.hardening "$desired"
+    [[ "$desired" == "true" ]] || return 0
+    pg_conf=$(sudo -u postgres psql -Atqc 'show config_file' 2>/dev/null || true)
+    pg_hba=$(sudo -u postgres psql -Atqc 'show hba_file' 2>/dev/null || true)
+    if [[ -z "$pg_conf" || ! -f "$pg_conf" ]]; then
+        print_warning "Could not query PostgreSQL configuration paths; leaving the database unchanged."
         return 0
     fi
-
-    # Find PostgreSQL data directory
-    local pg_data=""
-    local pg_version=""
-
-    # Try to determine PostgreSQL version and data directory
-    if command -v psql >/dev/null 2>&1; then
-        pg_version=$(psql --version | awk '{print $3}' | cut -d. -f1-2)
-        pg_data="/var/lib/postgresql/$pg_version/main"
+    if [[ -f "$pg_hba" ]] && awk 'NF && $1 !~ /^#/ && $NF == "trust" {found=1} END {exit !found}' "$pg_hba"; then
+        print_warning "PostgreSQL pg_hba.conf contains trust authentication. It was preserved; review it manually."
     fi
-
-    if [[ -z "$pg_data" || ! -d "$pg_data" ]]; then
-        print_error "Could not determine PostgreSQL data directory"
+    conf_dir=$(dirname "$pg_conf")/conf.d
+    managed="$conf_dir/99-du-setup.conf"
+    mkdir -p "$conf_dir"
+    if ! grep -Eq "^[[:space:]]*include_dir[[:space:]]*=[[:space:]]*'conf.d'" "$pg_conf"; then
+        print_warning "$pg_conf does not include conf.d; preserving it and skipping managed settings."
+        return 0
+    fi
+    staged=$(mktemp)
+    cat > "$staged" <<'EOF'
+# MANAGED BY du_setup. Manual edits may be overwritten on the next run.
+# Application-specific settings belong in another conf.d file.
+password_encryption = 'scram-sha-256'
+log_connections = on
+log_disconnections = on
+log_lock_waits = on
+EOF
+    [[ -f "$managed" ]] && { backup=$(mktemp); cp -a "$managed" "$backup"; }
+    install -m 0644 -o postgres -g postgres "$staged" "$managed"
+    rm -f "$staged"
+    if ! sudo -u postgres psql -Atqc 'select pg_reload_conf()' | grep -qx t; then
+        print_error "PostgreSQL rejected the managed configuration; rolling it back."
+        [[ -n "$backup" ]] && cp -a "$backup" "$managed" || rm -f "$managed"
+        sudo -u postgres psql -Atqc 'select pg_reload_conf()' >/dev/null 2>&1 || true
+        rm -f "$backup"
         return 1
     fi
-
-    print_info "Securing PostgreSQL installation..."
-
-    # Backup original configuration
-    local pg_hba="$pg_data/pg_hba.conf"
-    local pg_conf="$pg_data/postgresql.conf"
-
-    if [[ -f "$pg_hba" ]]; then
-        cp "$pg_hba" "$pg_hba.backup.$(date +%Y%m%d_%H%M%S)"
-    fi
-
-    if [[ -f "$pg_conf" ]]; then
-        cp "$pg_conf" "$pg_conf.backup.$(date +%Y%m%d_%H%M%S)"
-    fi
-
-    # Configure pg_hba.conf for secure connections
-    print_info "Configuring secure host-based authentication..."
-    cat > "$pg_hba" <<'EOF'
-# PostgreSQL Client Authentication Configuration File
-# TYPE  DATABASE        USER            ADDRESS                 METHOD
-
-# "local" is for Unix domain socket connections only
-local   all             postgres                                peer
-local   all             all                                     md5
-
-# IPv4 local connections:
-host    all             all             127.0.0.1/32            md5
-host    all             all             0.0.0.0/0               reject
-
-# IPv6 local connections:
-host    all             all             ::1/128                 md5
-host    all             all             ::/0                    reject
-
-# Allow replication connections from localhost, by a user with the
-# replication privilege.
-local   replication     all                                     peer
-host    replication     all             127.0.0.1/32            md5
-host    replication     all             ::1/128                 md5
-EOF
-
-    # Configure postgresql.conf for security
-    print_info "Configuring PostgreSQL security settings..."
-
-    # Update or add security settings
-    grep -q "^ssl = on" "$pg_conf" || echo "ssl = on" >> "$pg_conf"
-    grep -q "^password_encryption = scram-sha-256" "$pg_conf" || echo "password_encryption = scram-sha-256" >> "$pg_conf"
-    grep -q "^logging_collector = on" "$pg_conf" || echo "logging_collector = on" >> "$pg_conf"
-    grep -q "^log_destination = 'stderr'" "$pg_conf" || echo "log_destination = 'stderr'" >> "$pg_conf"
-    grep -q "^log_directory = 'log'" "$pg_conf" || echo "log_directory = 'log'" >> "$pg_conf"
-    grep -q "^log_filename = 'postgresql-%Y-%m-%d_%H%M%S.log'" "$pg_conf" || echo "log_filename = 'postgresql-%Y-%m-%d_%H%M%S.log'" >> "$pg_conf"
-    grep -q "^log_statement = 'all'" "$pg_conf" || echo "log_statement = 'all'" >> "$pg_conf"
-    grep -q "^log_connections = on" "$pg_conf" || echo "log_connections = on" >> "$pg_conf"
-    grep -q "^log_disconnections = on" "$pg_conf" || echo "log_disconnections = on" >> "$pg_conf"
-    grep -q "^log_lock_waits = on" "$pg_conf" || echo "log_lock_waits = on" >> "$pg_conf"
-
-    # Restart PostgreSQL
-    print_info "Restarting PostgreSQL service..."
-    systemctl restart postgresql
-
-    if systemctl is-active --quiet postgresql; then
-        print_success "PostgreSQL security configuration applied"
-    else
-        print_error "PostgreSQL service failed to restart"
-        FAILED_SERVICES+=("postgresql")
-    fi
-
-    log "PostgreSQL hardening completed"
+    [[ -n "$backup" ]] && cmp -s "$backup" "$managed" || changed=true
+    rm -f "$backup"
+    [[ "$changed" == "true" ]] && print_success "PostgreSQL managed settings reloaded; pg_hba.conf was preserved." || print_info "PostgreSQL settings already match desired state."
 }
 
 # --- Database Firewall Configuration Function ---
 configure_database_firewall() {
-    print_section "Database Firewall Configuration"
-
-    if ! confirm "Configure firewall rules for database access?"; then
-        print_info "Skipping database firewall configuration."
-        return 0
-    fi
-
-    # Check if UFW is available
-    if ! command -v ufw >/dev/null 2>&1; then
-        print_warning "UFW firewall not found. Skipping firewall configuration."
-        return 1
-    fi
-
-    local firewall_rules_applied=false
-
-    # MySQL/MariaDB firewall rules
-    if [[ "$MYSQL_DETECTED" == "true" ]]; then
-        print_info "Configuring firewall for MySQL/MariaDB..."
-
-        # Allow MySQL from localhost only
-        if ufw allow from 127.0.0.1 to any port 3306 >/dev/null 2>&1; then
-            print_success "MySQL/MariaDB firewall rules applied (localhost only)"
-            firewall_rules_applied=true
-        fi
-
-        # Deny MySQL from external sources
-        if ufw deny from any to any port 3306 >/dev/null 2>&1; then
-            print_success "External MySQL/MariaDB access blocked"
+    print_section "Database Firewall Review"
+    print_warning "Database firewall rules are application-owned and will not be rewritten."
+    if command -v ufw >/dev/null 2>&1; then
+        local relevant_rules
+        relevant_rules=$(ufw status numbered 2>/dev/null | grep -E '(^|[^0-9])(3306|5432)([^0-9]|$)' || true)
+        if [[ -n "$relevant_rules" ]]; then
+            printf '%s\n' "$relevant_rules"
+        else
+            print_info "No explicit UFW rules for ports 3306 or 5432 were found."
         fi
     fi
-
-    # PostgreSQL firewall rules
-    if [[ "$POSTGRESQL_DETECTED" == "true" ]]; then
-        print_info "Configuring firewall for PostgreSQL..."
-
-        # Allow PostgreSQL from localhost only
-        if ufw allow from 127.0.0.1 to any port 5432 >/dev/null 2>&1; then
-            print_success "PostgreSQL firewall rules applied (localhost only)"
-            firewall_rules_applied=true
-        fi
-
-        # Deny PostgreSQL from external sources
-        if ufw deny from any to any port 5432 >/dev/null 2>&1; then
-            print_success "External PostgreSQL access blocked"
-        fi
+    if command -v ss >/dev/null 2>&1; then
+        print_info "Observed database listeners:"
+        ss -H -lntp 2>/dev/null | grep -E ':(3306|5432)([[:space:]]|$)' || print_info "No TCP database listeners were observed."
     fi
-
-    if [[ "$firewall_rules_applied" == "true" ]]; then
-        print_info "Reloading firewall..."
-        ufw reload >/dev/null 2>&1
-        print_success "Database firewall configuration completed"
-    fi
-
-    log "Database firewall configuration completed"
+    print_info "Review remote application CIDRs and provider firewall rules before changing database reachability."
+    log "Database firewall reviewed without changing application access rules"
 }
 
 # --- Database Backup Encryption Function ---
 setup_database_backup_encryption() {
     print_section "Database Backup Encryption Setup"
-
-    if ! confirm "Set up encrypted database backups with GPG?"; then
-        print_info "Skipping database backup encryption setup."
+    local installed=false desired recipient script=/usr/local/bin/database_backup.sh
+    [[ -f "$script" ]] && installed=true
+    desired=$(prompt_bool_current "Manage encrypted native-database backups?" "$installed") || return 1
+    state_set database.backup "$desired"
+    [[ "$desired" == "true" ]] || {
+        print_info "Encrypted database backup remains disabled; existing files were not deleted."
         return 0
+    }
+
+    recipient=$(prompt_value_current "GPG recipient fingerprint/email" "$(state_get database.gpg_recipient '')") || return 1
+    if ! gpg --batch --list-keys -- "$recipient" >/dev/null 2>&1; then
+        print_error "No root GPG public key matches '$recipient'; backup setup was not changed."
+        return 1
     fi
+    state_set database.gpg_recipient "$recipient"
 
-    # Check if GPG is available
-    if ! command -v gpg >/dev/null 2>&1; then
-        print_info "Installing GPG for backup encryption..."
-        apt-get update >/dev/null 2>&1
-        apt-get install -y gnupg2 >/dev/null 2>&1
-    fi
-
-    # Create backup directory
-    local backup_dir="/var/backups/database_encrypted"
-    mkdir -p "$backup_dir"
-    chmod 700 "$backup_dir"
-
-    # Create backup script
-    local backup_script="/usr/local/bin/database_backup.sh"
-
-    cat > "$backup_script" <<'EOF'
+    install -d -m 0700 /var/backups/database_encrypted
+    local staged
+    staged=$(mktemp)
+    cat > "$staged" <<EOF
 #!/bin/bash
+# MANAGED BY du_setup_modular. Manual edits may be overwritten on the next run.
+set -Eeuo pipefail
+umask 077
+BACKUP_DIR=/var/backups/database_encrypted
+RECIPIENT=$(printf '%q' "$recipient")
+DATE=\$(date +%Y%m%d_%H%M%S)
+WORK_DIR=\$(mktemp -d /var/backups/.database-backup.XXXXXX)
+trap 'rm -rf -- "\$WORK_DIR"' EXIT
+install -d -m 0700 "\$BACKUP_DIR"
 
-# Database Backup Script with GPG Encryption
-# Created by du_setup_modular.sh database security module
-
-BACKUP_DIR="/var/backups/database_encrypted"
-LOG_FILE="/var/log/database_backup.log"
-DATE=$(date +%Y%m%d_%H%M%S)
-
-# Function to log messages
-log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
+encrypt_dump() {
+    local source=\$1 destination=\$2
+    [[ -s "\$source" ]] || return 1
+    gpg --batch --yes --trust-model always --recipient "\$RECIPIENT" \
+        --output "\$destination" --encrypt "\$source"
+    [[ -s "\$destination" ]]
 }
 
-# Function to backup MySQL/MariaDB (native and Docker)
-backup_mysql() {
-    # Check for native MySQL/MariaDB
-    if command -v mysql >/dev/null 2>&1 && systemctl is-active --quiet mysql 2>/dev/null; then
-        log "Starting native MySQL backup..."
-        local backup_file="$BACKUP_DIR/mysql_native_backup_$DATE.sql"
-
-        # Create SQL backup
-        mysqldump --single-transaction --routines --triggers --all-databases > "$backup_file"
-
-        if [[ -f "$backup_file" ]]; then
-            # Encrypt with GPG (you'll need to set up a GPG key)
-            gpg --symmetric --cipher-algo AES256 --compress-algo 1 --s2k-mode 3 \
-                --s2k-digest-algo SHA512 --s2k-count 65536 --force-mdc \
-                --output "$backup_file.gpg" "$backup_file"
-
-            # Remove unencrypted backup
-            rm "$backup_file"
-
-            log "Native MySQL backup encrypted: $backup_file.gpg"
-        fi
+if command -v mysqldump >/dev/null 2>&1 && { systemctl is-active --quiet mysql || systemctl is-active --quiet mariadb; }; then
+    mysql_dump="\$WORK_DIR/mysql.sql"
+    if mysqldump --single-transaction --routines --triggers --all-databases > "\$mysql_dump"; then
+        encrypt_dump "\$mysql_dump" "\$BACKUP_DIR/mysql_\$DATE.sql.gpg"
     fi
+fi
 
-    # Check for Docker MySQL/MariaDB containers
-    if command -v docker >/dev/null 2>&1; then
-        local mysql_containers=$(docker ps --format "table {{.Names}}\t{{.Image}}" | grep -E "(mysql|mariadb)" | awk '{print $1}')
-        for container in $mysql_containers; do
-            log "Starting Docker MySQL backup for container: $container"
-            local backup_file="$BACKUP_DIR/mysql_docker_${container}_backup_$DATE.sql"
-
-            # Create SQL backup from Docker container
-            docker exec "$container" mysqldump --single-transaction --routines --triggers --all-databases > "$backup_file" 2>/dev/null
-
-            if [[ -f "$backup_file" && -s "$backup_file" ]]; then
-                # Encrypt with GPG (you'll need to set up a GPG key)
-                gpg --symmetric --cipher-algo AES256 --compress-algo 1 --s2k-mode 3 \
-                    --s2k-digest-algo SHA512 --s2k-count 65536 --force-mdc \
-                    --output "$backup_file.gpg" "$backup_file"
-
-                # Remove unencrypted backup
-                rm "$backup_file"
-
-                log "Docker MySQL backup encrypted for $container: $backup_file.gpg"
-            else
-                log "Failed to create backup for Docker MySQL container: $container"
-            fi
-        done
+if command -v pg_dumpall >/dev/null 2>&1 && systemctl is-active --quiet postgresql; then
+    pg_dump="\$WORK_DIR/postgresql.sql"
+    if sudo -u postgres pg_dumpall > "\$pg_dump"; then
+        encrypt_dump "\$pg_dump" "\$BACKUP_DIR/postgresql_\$DATE.sql.gpg"
     fi
-}
+fi
 
-# Function to backup PostgreSQL (native and Docker)
-backup_postgresql() {
-    # Check for native PostgreSQL
-    if command -v pg_dumpall >/dev/null 2>&1 && systemctl is-active --quiet postgresql 2>/dev/null; then
-        log "Starting native PostgreSQL backup..."
-        local backup_file="$BACKUP_DIR/postgresql_native_backup_$DATE.sql"
-
-        # Create SQL backup
-        sudo -u postgres pg_dumpall > "$backup_file"
-
-        if [[ -f "$backup_file" ]]; then
-            # Encrypt with GPG (you'll need to set up a GPG key)
-            gpg --symmetric --cipher-algo AES256 --compress-algo 1 --s2k-mode 3 \
-                --s2k-digest-algo SHA512 --s2k-count 65536 --force-mdc \
-                --output "$backup_file.gpg" "$backup_file"
-
-            # Remove unencrypted backup
-            rm "$backup_file"
-
-            log "Native PostgreSQL backup encrypted: $backup_file.gpg"
-        fi
-    fi
-
-    # Check for Docker PostgreSQL containers
-    if command -v docker >/dev/null 2>&1; then
-        local postgresql_containers=$(docker ps --format "table {{.Names}}\t{{.Image}}" | grep postgres | awk '{print $1}')
-        for container in $postgresql_containers; do
-            log "Starting Docker PostgreSQL backup for container: $container"
-            local backup_file="$BACKUP_DIR/postgresql_docker_${container}_backup_$DATE.sql"
-
-            # Create SQL backup from Docker container
-            docker exec "$container" pg_dumpall -U postgres > "$backup_file" 2>/dev/null
-
-            if [[ -f "$backup_file" && -s "$backup_file" ]]; then
-                # Encrypt with GPG (you'll need to set up a GPG key)
-                gpg --symmetric --cipher-algo AES256 --compress-algo 1 --s2k-mode 3 \
-                    --s2k-digest-algo SHA512 --s2k-count 65536 --force-mdc \
-                    --output "$backup_file.gpg" "$backup_file"
-
-                # Remove unencrypted backup
-                rm "$backup_file"
-
-                log "Docker PostgreSQL backup encrypted for $container: $backup_file.gpg"
-            else
-                log "Failed to create backup for Docker PostgreSQL container: $container"
-            fi
-        done
-    fi
-}
-
-# Main backup execution
-backup_mysql
-backup_postgresql
-
-# Clean up old backups (keep last 7 days)
-find "$BACKUP_DIR" -name "*.gpg" -mtime +7 -delete
-
-log "Database backup completed"
+find "\$BACKUP_DIR" -maxdepth 1 -type f -name '*.gpg' -mtime +7 -delete
 EOF
-
-    chmod +x "$backup_script"
-
-    # Create cron job for daily backups at 2 AM
-    local cron_file="/etc/cron.d/database_backup"
-    echo "0 2 * * * root $backup_script" > "$cron_file"
-
-    print_success "Database backup encryption script created"
-    print_info "Backup script: $backup_script"
-    print_info "Backup directory: $backup_dir"
-    print_warning "Remember to set up GPG keys for encryption"
-    print_info "Cron job scheduled for daily execution at 2 AM"
-
-    log "Database backup encryption setup completed"
+    install -m 0700 -o root -g root "$staged" "$script"
+    rm -f "$staged"
+    cat > /etc/cron.d/du-setup-database-backup <<'EOF'
+# MANAGED BY du_setup. Manual edits may be overwritten on the next run.
+0 2 * * * root /usr/local/bin/database_backup.sh
+EOF
+    chmod 0644 /etc/cron.d/du-setup-database-backup
+    print_success "Recipient-encrypted native database backups configured."
+    print_warning "Docker databases were not modified; configure application-aware dumps separately."
 }
 
 # --- Database Audit Logging Function ---
 setup_database_audit_logging() {
-    print_section "Database Audit Logging Configuration"
-
-    if ! confirm "Set up comprehensive database audit logging?"; then
-        print_info "Skipping database audit logging setup."
-        return 0
-    fi
-
-    local audit_configured=false
-
-    # MySQL/MariaDB audit logging
+    print_section "Database Audit Logging Review"
+    print_warning "Audit plugins and shared_preload_libraries are application-sensitive and are not enabled automatically."
     if [[ "$MYSQL_DETECTED" == "true" ]]; then
-        print_info "Configuring MySQL/MariaDB audit logging..."
-
-        local mysql_audit_conf="/etc/mysql/conf.d/audit.cnf"
-        if [[ ! -f "$mysql_audit_conf" ]]; then
-            cat > "$mysql_audit_conf" <<'EOF'
-[mysqld]
-# Audit Plugin Configuration
-plugin-load = audit_log.so
-audit_log_file = /var/log/mysql/audit.log
-audit_log_format = JSON
-audit_log_policy = ALL
-audit_log_rotate_on_size = 1073741824  # 1GB
-audit_log_rotations = 5
-audit_log_buffer_size = 1048576  # 1MB
-EOF
-
-            # Create audit log directory and set permissions
-            mkdir -p /var/log/mysql
-            touch /var/log/mysql/audit.log
-            chown mysql:mysql /var/log/mysql/audit.log
-            chmod 640 /var/log/mysql/audit.log
-
-            audit_configured=true
-            print_success "MySQL/MariaDB audit logging configured"
-        else
-            print_info "MySQL/MariaDB audit logging already configured"
-        fi
+        local mysql_plugins
+        mysql_plugins=$(mysql -NBe "SELECT PLUGIN_NAME, PLUGIN_STATUS FROM INFORMATION_SCHEMA.PLUGINS WHERE PLUGIN_NAME LIKE '%audit%';" 2>/dev/null || true)
+        [[ -n "$mysql_plugins" ]] && printf '%s\n' "$mysql_plugins" || print_info "No active MySQL/MariaDB audit plugin was detected."
     fi
-
-    # PostgreSQL audit logging
     if [[ "$POSTGRESQL_DETECTED" == "true" ]]; then
-        print_info "Configuring PostgreSQL audit logging..."
-
-        # Install pgaudit extension if available
-        if apt-cache show postgresql-*-pgaudit >/dev/null 2>&1; then
-            local pg_version=$(psql --version 2>/dev/null | awk '{print $3}' | cut -d. -f1)
-            if [[ -n "$pg_version" ]]; then
-                apt-get install -y "postgresql-$pg_version-pgaudit" >/dev/null 2>&1
-
-                # Find PostgreSQL data directory
-                local pg_data="/var/lib/postgresql/$pg_version/main"
-                local pg_conf="$pg_data/postgresql.conf"
-
-                # Add pgaudit configuration
-                grep -q "^shared_preload_libraries = 'pgaudit'" "$pg_conf" || \
-                    echo "shared_preload_libraries = 'pgaudit'" >> "$pg_conf"
-
-                grep -q "^pgaudit.log = 'all'" "$pg_conf" || \
-                    echo "pgaudit.log = 'all'" >> "$pg_conf"
-
-                grep -q "^pgaudit.log_catalog = on" "$pg_conf" || \
-                    echo "pgaudit.log_catalog = on" >> "$pg_conf"
-
-                grep -q "^pgaudit.log_level = 'log'" "$pg_conf" || \
-                    echo "pgaudit.log_level = 'log'" >> "$pg_conf"
-
-                # Restart PostgreSQL to load pgaudit
-                systemctl restart postgresql
-
-                audit_configured=true
-                print_success "PostgreSQL audit logging configured with pgaudit"
-            fi
-        else
-            print_warning "PostgreSQL audit extension (pgaudit) not available"
-        fi
+        local pg_preload
+        pg_preload=$(sudo -u postgres psql -Atqc "show shared_preload_libraries" 2>/dev/null || true)
+        [[ "$pg_preload" == *pgaudit* ]] && print_info "PostgreSQL pgaudit is present in shared_preload_libraries." || print_info "PostgreSQL pgaudit was not detected."
     fi
-
-    if [[ "$audit_configured" == "true" ]]; then
-        # Create log rotation for audit logs
-        local logrotate_conf="/etc/logrotate.d/database-audit"
-        cat > "$logrotate_conf" <<'EOF'
-/var/log/mysql/audit.log {
-    daily
-    rotate 30
-    compress
-    delaycompress
-    missingok
-    notifempty
-    create 640 mysql mysql
-    postrotate
-        systemctl reload mysql >/dev/null 2>&1 || true
-    endscript
-}
-
-/var/log/postgresql/*/postgresql-*.log {
-    daily
-    rotate 30
-    compress
-    delaycompress
-    missingok
-    notifempty
-    postrotate
-        systemctl reload postgresql >/dev/null 2>&1 || true
-    endscript
-}
-EOF
-
-        print_success "Database audit logging configured with log rotation"
-    fi
-
-    log "Database audit logging setup completed"
+    print_info "Enable database audit logging through an application-aware maintenance change with plugin validation and a rollback window."
+    log "Database audit logging reviewed without changing database plugins"
 }
 
 # --- Docker Database Security Functions ---
 harden_docker_mysql() {
-    print_section "Docker MySQL/MariaDB Security Hardening"
-
-    if ! confirm "Apply Docker MySQL/MariaDB security hardening?"; then
-        print_info "Skipping Docker MySQL/MariaDB hardening."
-        return 0
-    fi
-
-    local mysql_containers=$(docker ps --format "table {{.Names}}\t{{.Image}}" | grep -E "(mysql|mariadb)" | awk '{print $1}')
-
-    for container in $mysql_containers; do
-        print_info "Securing Docker MySQL/MariaDB container: $container"
-
-        # Check if container has custom config mounted
-        local has_config_mount=$(docker inspect --format='{{range .Mounts}}{{if eq .Destination "/etc/mysql/conf.d"}}{{.Source}}{{end}}{{end}}' "$container" 2>/dev/null)
-
-        if [[ -n "$has_config_mount" ]]; then
-            print_info "Container $container has config mounted at $has_config_mount"
-
-            # Create security config file on host
-            local security_config="$has_config_mount/security.cnf"
-            if [[ ! -f "$security_config" ]]; then
-                cat > "$security_config" <<'EOF'
-[mysqld]
-# Security enhancements
-skip-show-database = 1
-local-infile = 0
-
-# Logging for audit
-general_log = 1
-general_log_file = /var/log/mysql/general.log
-log_error = /var/log/mysql/error.log
-slow_query_log = 1
-slow_query_log_file = /var/log/mysql/slow.log
-long_query_time = 2
-
-# Connection security
-max_connect_errors = 10
-max_user_connections = 100
-EOF
-                print_success "Created security config for $container"
-
-                # Restart container to apply config
-                docker restart "$container" >/dev/null 2>&1
-                print_info "Restarted container $container to apply security settings"
-            else
-                print_info "Security config already exists for $container"
-            fi
-        else
-            print_warning "Container $container does not have config directory mounted. Manual configuration required."
-            print_info "Consider running with: -v /path/to/config:/etc/mysql/conf.d"
-        fi
-    done
-
-    log "Docker MySQL/MariaDB hardening completed"
+    print_section "Docker MySQL/MariaDB Security Review"
+    print_warning "Container database configuration is application-owned and will not be rewritten."
+    docker ps --format '{{.Names}} {{.Image}}' | grep -E '(mysql|mariadb)' || true
+    print_info "Use a version-controlled mounted conf.d file in the application deployment."
 }
 
 harden_docker_postgresql() {
-    print_section "Docker PostgreSQL Security Hardening"
-
-    if ! confirm "Apply Docker PostgreSQL security hardening?"; then
-        print_info "Skipping Docker PostgreSQL hardening."
-        return 0
-    fi
-
-    local postgresql_containers=$(docker ps --format "table {{.Names}}\t{{.Image}}" | grep postgres | awk '{print $1}')
-
-    for container in $postgresql_containers; do
-        print_info "Securing Docker PostgreSQL container: $container"
-
-        # Check if container has data directory mounted
-        local has_data_mount=$(docker inspect --format='{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Source}}{{end}}{{end}}' "$container" 2>/dev/null)
-
-        if [[ -n "$has_data_mount" ]]; then
-            print_info "Container $container has data mounted at $has_data_mount"
-
-            # Create postgresql.conf security additions
-            local pg_conf="$has_data_mount/postgresql.conf"
-            if [[ -f "$pg_conf" ]]; then
-                # Backup original
-                cp "$pg_conf" "$pg_conf.backup.$(date +%Y%m%d_%H%M%S)"
-
-                # Add security settings
-                grep -q "^password_encryption = scram-sha-256" "$pg_conf" || \
-                    echo "password_encryption = scram-sha-256" >> "$pg_conf"
-
-                grep -q "^logging_collector = on" "$pg_conf" || \
-                    echo "logging_collector = on" >> "$pg_conf"
-
-                grep -q "^log_statement = 'all'" "$pg_conf" || \
-                    echo "log_statement = 'all'" >> "$pg_conf"
-
-                grep -q "^log_connections = on" "$pg_conf" || \
-                    echo "log_connections = on" >> "$pg_conf"
-
-                grep -q "^log_disconnections = on" "$pg_conf" || \
-                    echo "log_disconnections = on" >> "$pg_conf"
-
-                # Create pg_hba.conf for secure connections
-                local pg_hba="$has_data_mount/pg_hba.conf"
-                if [[ -f "$pg_hba" ]]; then
-                    cp "$pg_hba" "$pg_hba.backup.$(date +%Y%m%d_%H%M%S)"
-
-                    cat > "$pg_hba" <<'EOF'
-# PostgreSQL Client Authentication Configuration File
-# TYPE  DATABASE        USER            ADDRESS                 METHOD
-
-# "local" is for Unix domain socket connections only
-local   all             postgres                                peer
-local   all             all                                     md5
-
-# IPv4 local connections:
-host    all             all             127.0.0.1/32            md5
-host    all             all             0.0.0.0/0               reject
-
-# IPv6 local connections:
-host    all             all             ::1/128                 md5
-host    all             all             ::/0                    reject
-
-# Allow replication connections from localhost
-local   replication     all                                     peer
-host    replication     all             127.0.0.1/32            md5
-host    replication     all             ::1/128                 md5
-EOF
-                fi
-
-                # Restart container to apply config
-                docker restart "$container" >/dev/null 2>&1
-                print_success "Restarted container $container to apply security settings"
-            else
-                print_warning "Could not find postgresql.conf in mounted data directory"
-            fi
-        else
-            print_warning "Container $container does not have data directory mounted. Manual configuration required."
-            print_info "Consider running with: -v /path/to/data:/var/lib/postgresql/data"
-        fi
-    done
-
-    log "Docker PostgreSQL hardening completed"
+    print_section "Docker PostgreSQL Security Review"
+    print_warning "Container pg_hba.conf and postgresql.conf are application-owned and will not be rewritten."
+    docker ps --format '{{.Names}} {{.Image}}' | grep postgres || true
+    print_info "Manage PostgreSQL access rules in the application's version-controlled deployment."
 }
 
 # --- Main Database Security Function ---

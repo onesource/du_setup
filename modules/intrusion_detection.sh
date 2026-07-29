@@ -68,32 +68,30 @@ install_mailutils_noninteractive() {
 configure_wazuh() {
     print_section "Wazuh HIDS (manager-only) Configuration"
 
-    if ! confirm "Install Wazuh Manager on this server (manager-only)?"; then
-        print_info "Skipping Wazuh installation."
+    local installed=false enabled=false desired WAZUH_BACKUP=""
+    is_installed wazuh-manager && installed=true
+    systemctl is-enabled --quiet wazuh-manager 2>/dev/null && systemctl is-active --quiet wazuh-manager && enabled=true
+    desired=$(prompt_component_desired wazuh "Wazuh manager-only" "$installed" "$enabled") || return 1
+    state_set component.wazuh "$desired"
+    if [[ "$desired" != "true" ]]; then
+        print_info "Wazuh manager will remain uninstalled or disabled."
         return 0
     fi
-
-    # Idempotency: if manager is installed, optionally reconfigure
-    if is_installed wazuh-manager; then
-        print_info "Wazuh manager appears installed."
-        if ! confirm "Reconfigure Wazuh manager?"; then
-            print_info "Skipping reconfiguration."
-            return 0
-        fi
-        mkdir -p "${BACKUP_DIR:-/var/backups}"
-        cp -a "${WAZUH_CONF}" "${BACKUP_DIR:-/var/backups}/wazuh_ossec.conf.bak_$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
+    if [[ -f "$WAZUH_CONF" ]]; then
+        WAZUH_BACKUP=$(mktemp)
+        cp -a "$WAZUH_CONF" "$WAZUH_BACKUP"
     fi
 
     # Ensure apt deps for repo
     print_info "Ensuring APT transport and GPG tools..."
     DEBIAN_FRONTEND=noninteractive apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl gnupg apt-transport-https lsb-release
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ca-certificates curl gnupg lsb-release nftables
 
     # Add Wazuh APT repo & key (idempotent)
     if [ ! -f /usr/share/keyrings/wazuh.gpg ] || [ ! -f /etc/apt/sources.list.d/wazuh.list ]; then
         print_info "Installing Wazuh repository key and apt source..."
         # Use gpg --dearmor to create a proper keyring for apt (more portable)
-        curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --dearmor >/usr/share/keyrings/wazuh.gpg 2>/dev/null || true
+        curl -fsSL https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --dearmor --yes -o /usr/share/keyrings/wazuh.gpg
         chmod 644 /usr/share/keyrings/wazuh.gpg || true
         echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" \
             > /etc/apt/sources.list.d/wazuh.list
@@ -106,12 +104,39 @@ configure_wazuh() {
         DEBIAN_FRONTEND=noninteractive apt-get install -y -qq wazuh-manager
         systemctl daemon-reload
         systemctl enable --now wazuh-manager
+
+        # Ensure the 'ossec' group is recognizable (refresh cache)
+        if ! getent group ossec >/dev/null 2>&1; then
+            print_info "Refreshing group cache for 'ossec'..."
+            if command -v nscd >/dev/null 2>&1; then nscd -i group || true; fi
+            sleep 1
+        fi
+
         # Ensure it is running
         if ! systemctl is-active --quiet wazuh-manager; then
             systemctl start wazuh-manager
         fi
     else
         print_info "wazuh-manager already installed."
+    fi
+
+    # A new package install creates the vendor configuration after our first
+    # backup opportunity. Capture it before applying du_setup customizations.
+    if [[ -z "$WAZUH_BACKUP" && -f "$WAZUH_CONF" ]]; then
+        WAZUH_BACKUP=$(mktemp)
+        cp -a "$WAZUH_CONF" "$WAZUH_BACKUP"
+    fi
+
+    # Dynamic Wazuh group detection (robust against name resolution issues)
+    local WAZUH_GROUP="ossec"
+    if [ -d "/var/ossec" ]; then
+        # Prefer numeric GID if name resolution is flaky
+        WAZUH_GROUP=$(stat -c '%g' /var/ossec 2>/dev/null || echo "ossec")
+        if [[ "$WAZUH_GROUP" =~ ^[0-9]+$ ]]; then
+            log "Using Wazuh GID: ${WAZUH_GROUP}"
+        else
+            log "Using Wazuh group name: ${WAZUH_GROUP}"
+        fi
     fi
 
     # Create include directories (keeps custom config isolated from upstream)
@@ -163,11 +188,11 @@ configure_wazuh() {
         # nginx
         if [ -d /var/log/nginx ] || [ -f /var/log/nginx/access.log ]; then
             echo '<localfile>'
-            echo '  <log_format>nginx</log_format>'
+            echo '  <log_format>syslog</log_format>'
             echo '  <location>/var/log/nginx/access.log</location>'
             echo '</localfile>'
             echo '<localfile>'
-            echo '  <log_format>nginx</log_format>'
+            echo '  <log_format>syslog</log_format>'
             echo '  <location>/var/log/nginx/error.log</location>'
             echo '</localfile>'
         fi
@@ -193,13 +218,16 @@ XML
     # Replace only when content differs
     if [ ! -f "${LOCALFILE_INCLUDE}" ] || ! cmp -s "${LOCALFILE_TMP}" "${LOCALFILE_INCLUDE}"; then
         mv "${LOCALFILE_TMP}" "${LOCALFILE_INCLUDE}"
-        chown root:ossec "${LOCALFILE_INCLUDE}" || true
-        chmod 640 "${LOCALFILE_INCLUDE}"
         print_info "Updated ${LOCALFILE_INCLUDE}"
     else
         rm -f "${LOCALFILE_TMP}"
-        print_info "No change to ${LOCALFILE_INCLUDE}"
+        print_info "No change to ${LOCALFILE_INCLUDE} content."
     fi
+
+    # Always ensure correct permissions/ownership (idempotent)
+    getent group ossec >/dev/null 2>&1 || true
+    chown "root:${WAZUH_GROUP}" "${LOCALFILE_INCLUDE}" || print_error "Failed to set ownership for ${LOCALFILE_INCLUDE}"
+    chmod 640 "${LOCALFILE_INCLUDE}"
 
     # --- Syscheck include (realtime selective) ---
     print_info "Writing Wazuh syscheck include (idempotent)..."
@@ -244,13 +272,15 @@ EOF
 
     if [ ! -f "${SYSCHECK_INCLUDE}" ] || ! cmp -s "${SYSCHECK_TMP}" "${SYSCHECK_INCLUDE}"; then
         mv "${SYSCHECK_TMP}" "${SYSCHECK_INCLUDE}"
-        chown root:ossec "${SYSCHECK_INCLUDE}" || true
-        chmod 640 "${SYSCHECK_INCLUDE}"
         print_info "Updated ${SYSCHECK_INCLUDE}"
     else
         rm -f "${SYSCHECK_TMP}"
-        print_info "No change to ${SYSCHECK_INCLUDE}"
+        print_info "No change to ${SYSCHECK_INCLUDE} content."
     fi
+
+    getent group ossec >/dev/null 2>&1 || true
+    chown "root:${WAZUH_GROUP}" "${SYSCHECK_INCLUDE}" || print_error "Failed to set ownership for ${SYSCHECK_INCLUDE}"
+    chmod 640 "${SYSCHECK_INCLUDE}"
 
     # --- Local rules include (idempotent) ---
     print_info "Writing Wazuh local rules include (idempotent)..."
@@ -258,60 +288,59 @@ EOF
     LOCAL_RULES_TMP=$(mktemp)
     cat > "${LOCAL_RULES_TMP}" <<'EOF'
 <group name="local,syslog,">
-  <!-- Detect multiple SSH failed attempts -->
-  <rule id="100001" level="10" frequency="6" timeframe="120">
+  <!-- Group rule for SSH failure baseline -->
+  <rule id="110000" level="0">
     <if_sid>5710,5716</if_sid>
+    <description>Base rule for SSH authentication failures.</description>
+  </rule>
+  <!-- Detect multiple SSH failed attempts using the base rule -->
+  <rule id="110001" level="10" frequency="6" timeframe="120">
+    <if_matched_sid>110000</if_matched_sid>
     <same_source_ip />
     <description>Multiple SSH failed attempts from same source IP.</description>
     <group>authentication_failures,ssh</group>
   </rule>
-
   <!-- Detect sudo usage -->
-  <rule id="100002" level="8">
+  <rule id="110002" level="8">
     <if_sid>5400</if_sid>
     <match>sudo:</match>
     <regex>USER=root ; COMMAND=</regex>
     <description>Sudo command executed as root.</description>
     <group>privilege_escalation,sudo</group>
   </rule>
-
   <!-- Detect new user creation -->
-  <rule id="100003" level="7">
+  <rule id="110003" level="7">
     <if_sid>5902</if_sid>
     <match>useradd</match>
     <description>New user account created.</description>
     <group>adduser,account_change</group>
   </rule>
-
   <!-- Detect cron modifications -->
-  <rule id="100004" level="8">
+  <rule id="110004" level="8">
     <if_sid>5400</if_sid>
     <match>crontab</match>
     <regex>EDIT|REPLACE|DELETE</regex>
     <description>Crontab file modified.</description>
     <group>config_change,cron</group>
   </rule>
-
   <!-- Detect package installs -->
-  <rule id="100005" level="7">
+  <rule id="110005" level="7">
     <if_sid>5400</if_sid>
     <match>dpkg|apt-get|apt</match>
     <regex>install</regex>
     <description>Package installation detected.</description>
     <group>package_install,software_mgmt</group>
   </rule>
-
   <!-- Detect network interface changes -->
-  <rule id="100006" level="8">
+  <rule id="110006" level="8">
     <if_sid>5400</if_sid>
     <match>ip link|ifconfig</match>
     <regex>up|down</regex>
     <description>Network interface state changed.</description>
     <group>network_change</group>
   </rule>
-
   <!-- Detect file integrity changes -->
-  <rule id="100007" level="12">
+  <rule id="110007" level="12">
     <if_sid>550</if_sid>
     <description>Integrity checksum changed.</description>
     <group>ossec,syscheck</group>
@@ -321,28 +350,77 @@ EOF
 
     if [ ! -f "${LOCAL_RULES_FILE}" ] || ! cmp -s "${LOCAL_RULES_TMP}" "${LOCAL_RULES_FILE}"; then
         mv "${LOCAL_RULES_TMP}" "${LOCAL_RULES_FILE}"
-        chown root:ossec "${LOCAL_RULES_FILE}" || true
-        chmod 640 "${LOCAL_RULES_FILE}"
         print_info "Updated ${LOCAL_RULES_FILE}"
     else
         rm -f "${LOCAL_RULES_TMP}"
-        print_info "No change to ${LOCAL_RULES_FILE}"
+        print_info "No change to ${LOCAL_RULES_FILE} content."
     fi
 
-    # --- Ensure ossec.conf includes our files (idempotent) ---
-    print_info "Ensuring ossec.conf references our include files..."
-    # Add include lines before closing tag if missing
-    grep -q '<include file="local/localfile_custom.conf"' "${WAZUH_CONF}" 2>/dev/null || \
-        sed -i '/<\/ossec_config>/i \  <include file="local/localfile_custom.conf" />' "${WAZUH_CONF}"
+    getent group ossec >/dev/null 2>&1 || true
+    chown "root:${WAZUH_GROUP}" "${LOCAL_RULES_FILE}" || print_error "Failed to set ownership for ${LOCAL_RULES_FILE}"
+    chmod 640 "${LOCAL_RULES_FILE}"
 
-    grep -q '<include file="local/syscheck_custom.conf"' "${WAZUH_CONF}" 2>/dev/null || \
-        sed -i '/<\/ossec_config>/i \  <include file="local/syscheck_custom.conf" />' "${WAZUH_CONF}"
+    # --- Ensure ossec.conf is clean and references our custom settings (Robust) ---
+    print_info "Ensuring ossec.conf references our custom settings..."
 
-    grep -q '<include>rules/local_rules_custom.xml' "${WAZUH_CONF}" 2>/dev/null || \
-        sed -i '/<\/ossec_config>/i \  <include>rules/local_rules_custom.xml</include>' "${WAZUH_CONF}"
+    # 1. Cleanup ALL old/fragile injection attempts (including historical ones)
+    sed -i '/<include file="local\/localfile_custom.conf"/d' "${WAZUH_CONF}" 2>/dev/null || true
+    sed -i '/<include file="local\/syscheck_custom.conf"/d' "${WAZUH_CONF}" 2>/dev/null || true
+    sed -i '/<include>rules\/local_rules_custom.xml/d' "${WAZUH_CONF}" 2>/dev/null || true
+    # Remove our marked block if it exists (idempotency)
+    sed -i '/<!-- DU_SETUP_CUSTOM_START -->/,/<!-- DU_SETUP_CUSTOM_END -->/d' "${WAZUH_CONF}"
 
-    # Signal Wazuh daemons to reload config (SIGHUP; safe)
-    wazuh_reload_hup
+    # 2. Add our custom configuration block as a separate, STANDALONE <ossec_config>
+    # Read the actual content of the custom files
+    LOCALFILE_CONTENT=""
+    [ -f "${LOCALFILE_INCLUDE}" ] && LOCALFILE_CONTENT=$(cat "${LOCALFILE_INCLUDE}")
+    SYSCHECK_CONTENT=""
+    [ -f "${SYSCHECK_INCLUDE}" ] && SYSCHECK_CONTENT=$(cat "${SYSCHECK_INCLUDE}")
+
+    # Prepare the custom block
+    {
+        echo "  <!-- DU_SETUP_CUSTOM_START -->"
+        echo "  <ossec_config>"
+        [ -n "$LOCALFILE_CONTENT" ] && echo "$LOCALFILE_CONTENT" | sed '/<?xml/d' | sed 's/^[[:space:]]*//'
+        [ -n "$SYSCHECK_CONTENT" ] && echo "$SYSCHECK_CONTENT" | sed '/<?xml/d' | sed 's/^[[:space:]]*//'
+        echo "  </ossec_config>"
+        echo "  <!-- DU_SETUP_CUSTOM_END -->"
+    } > "${LOCAL_INCLUDE_DIR}/combined_custom.tmp"
+
+    # Append to the very end of ossec.conf. A separate <ossec_config> block is legal and avoids nesting.
+    # We add a newline first to be safe.
+    echo "" >> "${WAZUH_CONF}"
+    cat "${LOCAL_INCLUDE_DIR}/combined_custom.tmp" >> "${WAZUH_CONF}"
+    rm -f "${LOCAL_INCLUDE_DIR}/combined_custom.tmp"
+
+    # 4. Validate configuration before reloading
+    print_info "Validating Wazuh configuration..."
+    if /var/ossec/bin/wazuh-analysisd -t >/dev/null 2>&1; then
+        print_success "Wazuh configuration validated."
+        wazuh_reload_hup
+    else
+        print_error "Wazuh configuration validation failed! Checking for redundant ossec_config blocks..."
+        # Sometimes multiple ossec_config tags are added; attempt one more cleanup
+        # This is a safety valve for previous failed runs
+        sed -i 'N;/<\/ossec_config>\n<ossec_config>/d' "${WAZUH_CONF}" 2>/dev/null || true
+        if /var/ossec/bin/wazuh-analysisd -t >/dev/null 2>&1; then
+            print_success "Wazuh configuration fixed and validated."
+        else
+            print_error "Wazuh configuration remains invalid; restoring the complete pre-change configuration."
+            log "Wazuh config validation failed; rollback initiated."
+            if [[ -n "$WAZUH_BACKUP" && -f "$WAZUH_BACKUP" ]]; then
+                cp -a "$WAZUH_BACKUP" "$WAZUH_CONF"
+            fi
+            rm -f "$WAZUH_BACKUP"
+            return 1
+        fi
+    fi
+
+    rm -f "$WAZUH_BACKUP"
+    if ! systemctl restart wazuh-manager; then
+        print_error "Failed to restart wazuh-manager. Check journalctl -xeu wazuh-manager."
+        return 1
+    fi
 
     # -------------------------------
     # Active-response: firewall-drop (IPv4 + IPv6 equal priority)
@@ -396,7 +474,8 @@ else
 fi
 EOF
         chmod 750 "${ACTIVE_RESPONSE_SCRIPT}"
-        chown root:ossec "${ACTIVE_RESPONSE_SCRIPT}" || true
+        getent group ossec >/dev/null 2>&1 || true
+        chown "root:${WAZUH_GROUP}" "${ACTIVE_RESPONSE_SCRIPT}" || print_error "Failed to set ownership for ${ACTIVE_RESPONSE_SCRIPT}"
         print_info "Active-response script installed."
     else
         print_info "Active-response script already present."

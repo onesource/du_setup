@@ -13,9 +13,13 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib/utils.sh"
 setup_backup() {
     print_section "Backup Configuration (rsync over SSH)"
 
-    if ! confirm "Configure rsync-based backups to a remote SSH server?"; then
-        print_info "Skipping backup configuration."
-        log "Backup configuration skipped by user."
+    local installed=false enabled=false desired
+    [[ -f /root/run_backup.sh ]] && installed=true
+    crontab -u root -l 2>/dev/null | grep -Fq "#-*- installed by du_setup script -*-" && enabled=true
+    desired=$(prompt_component_desired backup "rsync backup" "$installed" "$enabled") || return 1
+    state_set component.backup "$desired"
+    if [[ "$desired" != "true" ]]; then
+        print_info "The existing backup, if any, remains disabled and was not modified."
         return 0
     fi
 
@@ -44,24 +48,14 @@ setup_backup() {
         print_info "Existing root SSH key found at $ROOT_SSH_KEY."
     fi
 
-    # --- Collect Backup Destination Details with Retry Loops ---
+    # --- Reconcile Backup Destination ---
     local BACKUP_DEST BACKUP_PORT REMOTE_BACKUP_PATH SSH_COPY_ID_FLAGS=""
-
-    while true; do
-        read -rp "$(printf '%s' "${CYAN}Enter backup destination (e.g., u12345@u12345.your-storagebox.de): ${NC}")" BACKUP_DEST
-        if [[ "$BACKUP_DEST" =~ ^[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+$ ]]; then break; else print_error "Invalid format. Expected user@host. Please try again."; fi
-    done
-
-    while true; do
-        read -rp "$(printf '%s' "${CYAN}Enter destination SSH port (Hetzner uses 23) [22]: ${NC}")" BACKUP_PORT
-        BACKUP_PORT=${BACKUP_PORT:-22}
-        if [[ "$BACKUP_PORT" =~ ^[0-9]+$ && "$BACKUP_PORT" -ge 1 && "$BACKUP_PORT" -le 65535 ]]; then break; else print_error "Invalid port. Must be between 1 and 65535. Please try again."; fi
-    done
-
-    while true; do
-        read -rp "$(printf '%s' "${CYAN}Enter remote backup path (e.g., /home/my_backups/): ${NC}")" REMOTE_BACKUP_PATH
-        if [[ "$REMOTE_BACKUP_PATH" =~ ^/[^[:space:]]*/$ ]]; then break; else print_error "Invalid path. Must start and end with '/' and contain no spaces. Please try again."; fi
-    done
+    BACKUP_DEST=$(prompt_value_current "Backup destination (user@host)" "$(state_get backup.destination '')" validate_backup_destination)
+    BACKUP_PORT=$(prompt_value_current "Backup SSH port" "$(state_get backup.port 22)" validate_backup_port)
+    REMOTE_BACKUP_PATH=$(prompt_value_current "Remote backup path" "$(state_get backup.remote_path /home/backups/)" validate_remote_backup_path)
+    state_set backup.destination "$BACKUP_DEST"
+    state_set backup.port "$BACKUP_PORT"
+    state_set backup.remote_path "$REMOTE_BACKUP_PATH"
 
     print_info "Backup target set to: ${BACKUP_DEST}:${REMOTE_BACKUP_PATH} on port ${BACKUP_PORT}"
 
@@ -117,11 +111,13 @@ setup_backup() {
         if [[ ! -f "$ROOT_SSH_DIR/known_hosts" ]] || ! grep -q "$BACKUP_DEST" "$ROOT_SSH_DIR/known_hosts"; then
             print_warning "SSH key may not be copied yet. Connection test may fail."
         fi
-        local test_command="ssh -p \"$BACKUP_PORT\" -o BatchMode=yes -o ConnectTimeout=10 \"$BACKUP_DEST\" true"
+        local connection_ok=false
         if [[ -n "$SSH_COPY_ID_FLAGS" ]]; then
-            test_command="sftp -P \"$BACKUP_PORT\" -o BatchMode=yes -o ConnectTimeout=10 \"$BACKUP_DEST\" <<< 'quit'"
+            printf 'quit\n' | sftp -P "$BACKUP_PORT" -o BatchMode=yes -o ConnectTimeout=10 "$BACKUP_DEST" >/dev/null 2>&1 && connection_ok=true
+        else
+            ssh -p "$BACKUP_PORT" -o BatchMode=yes -o ConnectTimeout=10 "$BACKUP_DEST" true 2>/dev/null && connection_ok=true
         fi
-        if eval "$test_command" 2>/dev/null; then
+        if [[ "$connection_ok" == "true" ]]; then
             print_success "SSH connection to backup destination successful!"
         else
             print_error "SSH connection test failed. Please ensure key was copied correctly and port is open."
@@ -135,36 +131,36 @@ setup_backup() {
     fi
 
     # --- Collect Backup Source Directories ---
-    local BACKUP_DIRS_ARRAY=()
+    local BACKUP_DIRS_ARRAY=() current_sources
+    current_sources=$(state_get backup.sources "/home/${USERNAME}/")
     while true; do
-        print_info "Enter full paths of directories to back up, separated by spaces."
-        read -rp "$(printf '%s' "${CYAN}Default is '/home/${USERNAME}/'. Press Enter for default or provide your own: ${NC}")" -a user_input_dirs
-        if [ ${#user_input_dirs[@]} -eq 0 ]; then
-            BACKUP_DIRS_ARRAY=("/home/${USERNAME}/")
-            break
+        print_info "Enter absolute directory paths separated by spaces."
+        read -rp "$(printf '%s' "${CYAN}Backup sources [${current_sources}]: ${NC}")" -a user_input_dirs
+        if [[ ${#user_input_dirs[@]} -eq 0 ]]; then
+            read -r -a BACKUP_DIRS_ARRAY <<< "$current_sources"
+        else
+            BACKUP_DIRS_ARRAY=("${user_input_dirs[@]}")
         fi
-
-        local all_valid=true
-        for dir in "${user_input_dirs[@]}"; do
-            if [[ ! "$dir" =~ ^/ ]]; then
-                print_error "Invalid path: '$dir'. All paths must be absolute (start with '/'). Please try again."
+        local all_valid=true dir
+        for dir in "${BACKUP_DIRS_ARRAY[@]}"; do
+            if [[ ! "$dir" =~ ^/ || "$dir" == *$'\n'* ]]; then
+                print_error "Invalid path: '$dir'. Backup sources must be absolute paths without newlines."
                 all_valid=false
                 break
             fi
         done
-
-        if [[ "$all_valid" == true ]]; then
-            BACKUP_DIRS_ARRAY=("${user_input_dirs[@]}")
-            break
-        fi
+        [[ "$all_valid" == "true" && ${#BACKUP_DIRS_ARRAY[@]} -gt 0 ]] && break
     done
-    # Convert array to a space-separated string for backup script
-    local BACKUP_DIRS_STRING="${BACKUP_DIRS_ARRAY[*]}"
+    local BACKUP_DIRS_STRING="${BACKUP_DIRS_ARRAY[*]}" BACKUP_DIRS_DECL
+    printf -v BACKUP_DIRS_DECL '%q ' "${BACKUP_DIRS_ARRAY[@]}"
+    state_set backup.sources "$BACKUP_DIRS_STRING"
     print_info "Directories to be backed up: $BACKUP_DIRS_STRING"
 
     # --- Create Exclude File ---
-    print_info "Creating rsync exclude file at $EXCLUDE_FILE_PATH..."
-    tee "$EXCLUDE_FILE_PATH" > /dev/null <<'EOF'
+    if [[ ! -f "$EXCLUDE_FILE_PATH" ]]; then
+        print_info "Creating rsync exclude file at $EXCLUDE_FILE_PATH..."
+        tee "$EXCLUDE_FILE_PATH" > /dev/null <<'EOF'
+# MANAGED BY du_setup. Update choices through the reconciler; manual edits may be overwritten.
 # Default Exclusions
 .cache/
 .docker/
@@ -182,54 +178,101 @@ node_modules/
 .profile
 .wget-hsts
 EOF
-    if confirm "Add more directories/files to exclude list?"; then
-        read -rp "$(printf '%s' "${CYAN}Enter items separated by spaces (e.g., Videos/ 'My Documents/'): ${NC}")" -a extra_excludes
-        for item in "${extra_excludes[@]}"; do echo "$item" >> "$EXCLUDE_FILE_PATH"; done
+    elif ! head -n 1 "$EXCLUDE_FILE_PATH" | grep -Fq "MANAGED BY du_setup"; then
+        local exclude_temp
+        exclude_temp=$(mktemp)
+        {
+            printf '%s\n' '# MANAGED BY du_setup. Update choices through the reconciler; manual edits may be overwritten.'
+            cat "$EXCLUDE_FILE_PATH"
+        } > "$exclude_temp"
+        install -m 0600 "$exclude_temp" "$EXCLUDE_FILE_PATH"
+        rm -f "$exclude_temp"
+    else
+        print_info "Preserving the current managed rsync exclude list."
+    fi
+    local add_excludes
+    add_excludes=$(prompt_bool_current "Add entries to the current backup exclude list?" false) || return 1
+    if [[ "$add_excludes" == "true" ]]; then
+        read -rp "$(printf '%s' "${CYAN}Enter items separated by spaces: ${NC}")" -a extra_excludes
+        local item
+        for item in "${extra_excludes[@]}"; do
+            grep -Fxq -- "$item" "$EXCLUDE_FILE_PATH" || printf '%s\n' "$item" >> "$EXCLUDE_FILE_PATH"
+        done
     fi
     chmod 600 "$EXCLUDE_FILE_PATH"
-    print_success "Rsync exclude file created."
 
     # --- Collect Cron Schedule ---
-    local CRON_SCHEDULE="5 3 * * *"
-    print_info "Enter a cron schedule for backup. Use https://crontab.guru for help."
-    read -rp "$(printf '%s' "${CYAN}Enter schedule (default: daily at 3:05 AM) [${CRON_SCHEDULE}]: ${NC}")" input
-    CRON_SCHEDULE="${input:-$CRON_SCHEDULE}"
-    if ! echo "$CRON_SCHEDULE" | grep -qE '^((\*\/)?[0-9,-]+|\*)\s+(((\*\/)?[0-9,-]+|\*)\s+){3}((\*\/)?[0-9,-]+|\*|[0-6])$'; then
-        print_error "Invalid cron expression. Using default: ${CRON_SCHEDULE}"
-    fi
+    local CRON_SCHEDULE
+    CRON_SCHEDULE=$(prompt_value_current "Backup cron schedule" "$(state_get backup.schedule '5 3 * * *')" validate_cron_schedule)
+    state_set backup.schedule "$CRON_SCHEDULE"
 
     # --- Collect Notification Details ---
+    local BACKUP_CREDENTIALS="$DU_SETUP_CREDENTIALS_DIR/backup.env"
+    local current_notification notification_enabled change_notification=false
     local NOTIFICATION_SETUP="none" NTFY_URL="" NTFY_TOKEN="" DISCORD_WEBHOOK=""
-    if confirm "Enable backup status notifications?"; then
-        printf '%s' "${CYAN}Select notification method: 1) ntfy.sh 2) Discord  [1]: ${NC}"; read -r n_choice
-        if [[ "$n_choice" == "2" ]]; then
-            NOTIFICATION_SETUP="discord"
-            read -rp "$(printf '%s' "${CYAN}Enter Discord Webhook URL: ${NC}")" DISCORD_WEBHOOK
-            if [[ ! "$DISCORD_WEBHOOK" =~ ^https://discord.com/api/webhooks/ ]]; then
-                print_error "Invalid Discord webhook URL."
-                log "Invalid Discord webhook URL provided."
-                return 1
-            fi
-        else
-            NOTIFICATION_SETUP="ntfy"
-            read -rp "$(printf '%s' "${CYAN}Enter ntfy URL/topic (e.g., https://ntfy.sh/my-backups): ${NC}")" NTFY_URL
-            read -rp "$(printf '%s' "${CYAN}Enter ntfy Access Token (optional): ${NC}")" NTFY_TOKEN
-            if [[ ! "$NTFY_URL" =~ ^https?:// ]]; then
-                print_error "Invalid ntfy URL."
-                log "Invalid ntfy URL provided."
-                return 1
+    local preserve_credentials=false
+    current_notification=$(state_get backup.notifications none)
+    case "$current_notification" in ntfy|discord|none) ;; *) current_notification=none ;; esac
+    [[ -f "$BACKUP_CREDENTIALS" ]] || current_notification=none
+
+    local notification_current=false
+    [[ "$current_notification" != "none" ]] && notification_current=true
+    notification_enabled=$(prompt_bool_current "Enable backup status notifications?" "$notification_current") || return 1
+    if [[ "$notification_enabled" == "true" ]]; then
+        if [[ "$current_notification" != "none" ]]; then
+            NOTIFICATION_SETUP="$current_notification"
+            change_notification=$(prompt_bool_current "Change the existing $current_notification notification configuration?" false) || return 1
+            if [[ "$change_notification" == "false" ]]; then
+                preserve_credentials=true
             fi
         fi
+        if [[ "$preserve_credentials" != "true" ]]; then
+            local n_choice default_choice=1
+            [[ "$current_notification" == "discord" ]] && default_choice=2
+            printf '%s' "${CYAN}Select notification method: 1) ntfy.sh 2) Discord  [${default_choice}]: ${NC}"
+            read -r n_choice
+            n_choice=${n_choice:-$default_choice}
+            if [[ "$n_choice" == "2" ]]; then
+                NOTIFICATION_SETUP="discord"
+                read -rp "$(printf '%s' "${CYAN}Enter Discord Webhook URL: ${NC}")" DISCORD_WEBHOOK
+                if [[ ! "$DISCORD_WEBHOOK" =~ ^https://discord.com/api/webhooks/ ]]; then
+                    print_error "Invalid Discord webhook URL."
+                    return 1
+                fi
+            else
+                NOTIFICATION_SETUP="ntfy"
+                read -rp "$(printf '%s' "${CYAN}Enter ntfy URL/topic (e.g., https://ntfy.sh/my-backups): ${NC}")" NTFY_URL
+                read -rsp "$(printf '%s' "${CYAN}Enter ntfy access token (optional): ${NC}")" NTFY_TOKEN
+                printf '\n'
+                if [[ ! "$NTFY_URL" =~ ^https:// ]]; then
+                    print_error "The ntfy URL must use HTTPS."
+                    return 1
+                fi
+            fi
+        fi
+    fi
+    state_set backup.notifications "$NOTIFICATION_SETUP"
+
+    # Store notification credentials separately from executable code. Reusing
+    # the current configuration never rewrites the credential file.
+    if [[ "$preserve_credentials" != "true" ]]; then
+        {
+            printf 'NTFY_URL=%q\n' "$NTFY_URL"
+            printf 'NTFY_TOKEN=%q\n' "$NTFY_TOKEN"
+            printf 'DISCORD_WEBHOOK=%q\n' "$DISCORD_WEBHOOK"
+        } > "$BACKUP_CREDENTIALS"
+        chmod 0600 "$BACKUP_CREDENTIALS"
     fi
 
     # --- Generate Backup Script ---
     print_info "Generating backup script at $BACKUP_SCRIPT_PATH..."
     if ! tee "$BACKUP_SCRIPT_PATH" > /dev/null <<EOF
 #!/bin/bash
-# Generated by server setup script on $(date)
+# MANAGED BY du_setup. Manual edits may be overwritten on the next run.
+# Generated on $(date)
 set -Euo pipefail; umask 077
 # --- CONFIGURATION ---
-BACKUP_DIRS="${BACKUP_DIRS_STRING}"
+BACKUP_DIRS=(${BACKUP_DIRS_DECL})
 REMOTE_DEST="${BACKUP_DEST}"
 REMOTE_PATH="${REMOTE_BACKUP_PATH}"
 SSH_PORT="${BACKUP_PORT}"
@@ -238,9 +281,8 @@ LOG_FILE="/var/log/backup_rsync.log"
 LOCK_FILE="/tmp/backup_rsync.lock"
 HOSTNAME="\$(hostname -f)"
 NOTIFICATION_SETUP="${NOTIFICATION_SETUP}"
-NTFY_URL="${NTFY_URL}"
-NTFY_TOKEN="${NTFY_TOKEN}"
-DISCORD_WEBHOOK="${DISCORD_WEBHOOK}"
+# shellcheck source=/dev/null
+source "/etc/du-setup/credentials/backup.env"
 EOF
     then
         print_error "Failed to create backup script at $BACKUP_SCRIPT_PATH."
@@ -267,7 +309,7 @@ exec 200>"\$LOCK_FILE"; flock -n 200 || { echo "Backup already running."; exit 1
 touch "\$LOG_FILE"; chmod 600 "\$LOG_FILE"; if [[ -f "\$LOG_FILE" && \$(stat -c%s "\$LOG_FILE") -gt 10485760 ]]; then mv "\$LOG_FILE" "\${LOG_FILE}.1"; fi
 echo "--- Starting Backup at \$(date) ---" >> "\$LOG_FILE"
 # --- RSYNC COMMAND ---
-rsync_output=\$(rsync -avz --delete --stats --exclude-from="\$EXCLUDE_FILE" -e "ssh -p \$SSH_PORT" \$BACKUP_DIRS "\${REMOTE_DEST}:\${REMOTE_PATH}" 2>&1)
+rsync_output=\$(rsync -avz --delete --stats --exclude-from="\$EXCLUDE_FILE" -e "ssh -p \$SSH_PORT -o StrictHostKeyChecking=accept-new" "\${BACKUP_DIRS[@]}" "\${REMOTE_DEST}:\${REMOTE_PATH}" 2>&1)
 rsync_exit_code=\$?; echo "\$rsync_output" >> "\$LOG_FILE"
 # --- NOTIFICATION ---
 if [[ \$rsync_exit_code -eq 0 ]]; then
@@ -297,11 +339,6 @@ EOF
 
     # --- Configure Cron Job ---
     print_info "Configuring root cron job..."
-    # Ensure crontab is writable
-    local CRON_DIR="/var/spool/cron/crontabs"
-    mkdir -p "$CRON_DIR"
-    chmod 1730 "$CRON_DIR"
-    chown root:crontab "$CRON_DIR"
     # Validate inputs
     if [[ -z "$CRON_SCHEDULE" || -z "$BACKUP_SCRIPT_PATH" ]]; then
         print_error "Cron schedule or backup script path is empty."
@@ -388,7 +425,7 @@ test_backup() {
     print_info "Running test backup of single file to ${BACKUP_DEST}:${REMOTE_BACKUP_PATH}..."
     local RSYNC_OUTPUT RSYNC_EXIT_CODE TIMEOUT_DURATION=60
     local SSH_KEY="/root/.ssh/id_ed25519"
-    local SSH_COMMAND="ssh -p $BACKUP_PORT -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=no"
+    local SSH_COMMAND="ssh -p $BACKUP_PORT -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
 
     set +e
     RSYNC_OUTPUT=$(timeout "$TIMEOUT_DURATION" rsync -avz -e "$SSH_COMMAND" "$TEST_FILE" "${BACKUP_DEST}:${REMOTE_BACKUP_PATH}" 2>&1)
@@ -406,7 +443,7 @@ test_backup() {
     if [[ $RSYNC_EXIT_CODE -eq 0 ]]; then
         print_success "Test backup (single file) successful! Check $BACKUP_LOG for details."
         log "Test backup successful (single file)."
-        ssh -p "$BACKUP_PORT" -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=no "$BACKUP_DEST" "rm -f '${REMOTE_BACKUP_PATH}$(basename "$TEST_FILE")'" > /dev/null 2>&1 || true
+        ssh -p "$BACKUP_PORT" -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$BACKUP_DEST" "rm -f '${REMOTE_BACKUP_PATH}$(basename "$TEST_FILE")'" > /dev/null 2>&1 || true
         log "Attempted cleanup of remote test file: ${REMOTE_BACKUP_PATH}$(basename "$TEST_FILE")"
     else
         print_warning "The backup test (single file transfer) failed. This is not critical, and script will continue."
