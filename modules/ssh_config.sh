@@ -103,20 +103,28 @@ EOF
         ufw allow "$SSH_PORT"/tcp comment 'du_setup managed SSH' >/dev/null
     fi
 
+    # Record the effective unit even when no configuration reload is needed;
+    # finalization runs later and must never receive an empty service name.
+    if systemctl is-active --quiet ssh.socket 2>/dev/null; then
+        SSH_SERVICE=ssh.socket
+    elif systemctl list-unit-files ssh.service 2>/dev/null | grep -q '^ssh\.service'; then
+        SSH_SERVICE=ssh.service
+    else
+        SSH_SERVICE=sshd.service
+    fi
+
     if [[ "$changed" == "false" ]]; then
         print_info "Effective SSH configuration already matches the desired state."
         return 0
     fi
 
-    if systemctl is-active --quiet ssh.socket 2>/dev/null; then
-        SSH_SERVICE=ssh.socket
+    if [[ "$SSH_SERVICE" == "ssh.socket" ]]; then
         systemctl daemon-reload
         if ! systemctl restart ssh.socket; then
             rollback_ssh_changes "$main_backup" "$snippet_backup" "$managed_snippet"
             return 1
         fi
-    elif systemctl list-unit-files ssh.service >/dev/null 2>&1; then
-        SSH_SERVICE=ssh.service
+    elif [[ "$SSH_SERVICE" == "ssh.service" ]]; then
         if ! systemctl reload ssh.service; then
             rollback_ssh_changes "$main_backup" "$snippet_backup" "$managed_snippet"
             return 1

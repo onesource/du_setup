@@ -33,7 +33,17 @@ generate_summary() {
     printf '\n'
 
     print_separator "Final Service Status Check:"
-    for service in "$SSH_SERVICE" fail2ban chrony; do
+    local effective_ssh_service="${SSH_SERVICE:-}"
+    if [[ -z "$effective_ssh_service" ]]; then
+        if systemctl is-active --quiet ssh.socket 2>/dev/null; then
+            effective_ssh_service=ssh.socket
+        elif systemctl is-active --quiet ssh.service 2>/dev/null; then
+            effective_ssh_service=ssh.service
+        else
+            effective_ssh_service=sshd.service
+        fi
+    fi
+    for service in "$effective_ssh_service" fail2ban chrony; do
         if systemctl is-active --quiet "$service"; then
             printf "  %-20s ${GREEN}✓ Active${NC}\n" "$service"
         else
@@ -49,8 +59,8 @@ generate_summary() {
     docker_desired=$(state_get component.docker false)
     tailscale_desired=$(state_get component.tailscale false)
 
-    if [[ -x "$WAZUH_CONTROL" ]]; then
-        if "$WAZUH_CONTROL" status | grep -q "is running"; then
+    if is_installed wazuh-manager; then
+        if systemctl is-active --quiet wazuh-manager; then
             printf "  %-20s ${GREEN}Active${NC}\n" "wazuh-manager"
         elif [[ "$wazuh_desired" == "false" ]]; then
             printf "  %-20s ${YELLOW}Installed, intentionally disabled${NC}\n" "wazuh-manager"
