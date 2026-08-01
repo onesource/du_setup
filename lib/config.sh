@@ -27,7 +27,7 @@ case "$LETSENCRYPT_ENVIRONMENT" in
 esac
 
 # --- Update Configuration ---
-CURRENT_VERSION="0.75.3_modular"
+CURRENT_VERSION="0.75.4_modular"
 SCRIPT_URL="https://raw.githubusercontent.com/onesource/du_setup/refs/heads/main/du_setup_modular.sh"
 CONFIG_URL="https://raw.githubusercontent.com/onesource/du_setup/refs/heads/main/lib/config.sh"
 CHECKSUM_URL="${SCRIPT_URL}.sha256"

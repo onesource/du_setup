@@ -223,14 +223,21 @@ setup_user() {
 }
 
 # --- Custom .bashrc Configuration Function ---
-configure_custom_bashrc() {
+configure_custom_bashrc() (
     local USER_HOME="$1"
     local USERNAME="$2"
     local BASHRC_PATH="$USER_HOME/.bashrc"
     local temp_source_bashrc=""
     local keep_temp_source_on_error=false
 
-    trap 'rm -f "$temp_source_bashrc" 2>/dev/null' INT TERM
+    cleanup_custom_bashrc_temp() {
+        if [[ "$keep_temp_source_on_error" == false && -n "$temp_source_bashrc" ]]; then
+            rm -f "$temp_source_bashrc" 2>/dev/null
+        fi
+    }
+    trap cleanup_custom_bashrc_temp EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
 
     if ! confirm "Replace default .bashrc for '$USERNAME' with a custom one?" "n"; then
         print_info "Skipping custom .bashrc configuration."
@@ -309,11 +316,5 @@ configure_custom_bashrc() {
         fi
     fi
 
-    if [[ "$keep_temp_source_on_error" == false ]]; then
-        rm -f "$temp_source_bashrc" 2>/dev/null
-    fi
-
-    trap - INT TERM
-
     return 0
-}
+)

@@ -7,7 +7,7 @@
 
 -----
 
-**Version:** v0.75.3_modular
+**Version:** v0.75.4_modular
 
 **Last Updated:** 2026-08-01
 
