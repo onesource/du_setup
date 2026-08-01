@@ -32,6 +32,7 @@ cleanup_temp_files() {
             [[ -f "$file" ]] && rm -f "$file"
         done
     done
+    return 0
 }
 trap cleanup_temp_files EXIT
 

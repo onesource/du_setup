@@ -8,19 +8,12 @@
 # - Anomaly detector, log analysis
 # ====================================================================
 
-set -euo pipefail
-IFS=$'\n\t'
-
 # -----------------------
 # Module / environment
 # -----------------------
 # Source helper functions (adjust path as needed)
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/config.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/utils.sh"
-
-# Trap only on errors (not normal exit)
-trap 'print_error "Intrusion detection module failed on line $LINENO."; log "IDS module error on line $LINENO";' ERR
-trap 'log "Intrusion detection module completed."' EXIT
 
 # -----------------------
 # Helpers
@@ -1008,5 +1001,9 @@ configure_intrusion_detection() {
 
 # If run directly
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    set -Eeuo pipefail
+    IFS=$'\n\t'
+    trap 'print_error "Intrusion detection module failed on line $LINENO."; log "IDS module error on line $LINENO";' ERR
+    trap 'log "Intrusion detection module completed."' EXIT
     configure_intrusion_detection
 fi
