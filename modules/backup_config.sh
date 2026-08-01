@@ -277,12 +277,13 @@ REMOTE_DEST="${BACKUP_DEST}"
 REMOTE_PATH="${REMOTE_BACKUP_PATH}"
 SSH_PORT="${BACKUP_PORT}"
 EXCLUDE_FILE="${EXCLUDE_FILE_PATH}"
-LOG_FILE="/var/log/backup_rsync.log"
+LOG_FILE="${BACKUP_LOG}"
 LOCK_FILE="/tmp/backup_rsync.lock"
 HOSTNAME="\$(hostname -f)"
 NOTIFICATION_SETUP="${NOTIFICATION_SETUP}"
 # shellcheck source=/dev/null
 source "/etc/du-setup/credentials/backup.env"
+install -d -m 0750 "\$(dirname "\$LOG_FILE")"
 EOF
     then
         print_error "Failed to create backup script at $BACKUP_SCRIPT_PATH."
@@ -409,7 +410,7 @@ test_backup() {
     BACKUP_DEST=$(grep "^REMOTE_DEST=" "$BACKUP_SCRIPT_PATH" | cut -d'"' -f2 2>/dev/null || echo "unknown")
     BACKUP_PORT=$(grep "^SSH_PORT=" "$BACKUP_SCRIPT_PATH" | cut -d'"' -f2 2>/dev/null || echo "22")
     REMOTE_BACKUP_PATH=$(grep "^REMOTE_PATH=" "$BACKUP_SCRIPT_PATH" | cut -d'"' -f2 2>/dev/null || echo "unknown")
-    local BACKUP_LOG="/var/log/backup_rsync.log"
+    local backup_test_log="$BACKUP_LOG"
 
     if [[ "$BACKUP_DEST" == "unknown" || "$REMOTE_BACKUP_PATH" == "unknown" ]]; then
         print_error "Could not parse backup configuration from $BACKUP_SCRIPT_PATH."
@@ -446,10 +447,10 @@ test_backup() {
         echo "Output:"
         echo "$RSYNC_OUTPUT"
         echo "Exit Code: $RSYNC_EXIT_CODE"
-    } >> "$BACKUP_LOG"
+    } >> "$backup_test_log"
 
     if [[ $RSYNC_EXIT_CODE -eq 0 ]]; then
-        print_success "Test backup (single file) successful! Check $BACKUP_LOG for details."
+        print_success "Test backup (single file) successful! Check $backup_test_log for details."
         log "Test backup successful (single file)."
         ssh -p "$BACKUP_PORT" -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$BACKUP_DEST" "rm -f '${REMOTE_BACKUP_PATH}$(basename "$TEST_FILE")'" > /dev/null 2>&1 || true
         log "Attempted cleanup of remote test file: ${REMOTE_BACKUP_PATH}$(basename "$TEST_FILE")"
@@ -461,7 +462,7 @@ test_backup() {
             print_error "Test backup timed out after $TIMEOUT_DURATION seconds."
             log "Test backup failed: Timeout after $TIMEOUT_DURATION seconds."
         else
-            print_error "Test backup failed (exit code: $RSYNC_EXIT_CODE). See $BACKUP_LOG for details."
+            print_error "Test backup failed (exit code: $RSYNC_EXIT_CODE). See $backup_test_log for details."
             log "Test backup failed with exit code $RSYNC_EXIT_CODE."
             # Hints based on common rsync errors
             case "$RSYNC_OUTPUT" in

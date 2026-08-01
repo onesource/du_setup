@@ -700,8 +700,8 @@ EOF
     fi
 
     # security-analysis log
-    cat > /etc/logrotate.d/security-analysis <<'EOF'
-/var/log/security-analysis.log {
+    cat > /etc/logrotate.d/security-analysis <<EOF
+${DU_SETUP_LOG_DIR}/security-analysis.log {
     daily
     rotate 14
     compress
@@ -714,7 +714,8 @@ EOF
     # Analyzer script (reads Wazuh alerts file if present)
     cat > /usr/local/bin/security-log-analyzer.sh <<EOF
 #!/bin/bash
-LOG_FILE="/var/log/security-analysis.log"
+LOG_FILE="${DU_SETUP_LOG_DIR}/security-analysis.log"
+install -d -m 0750 "\$(dirname "\$LOG_FILE")"
 log() { echo "[\$(date '+%Y-%m-%d %H:%M:%S')] \$1" >> "\$LOG_FILE"; }
 
 # SSH failed logins
@@ -756,7 +757,8 @@ write_anomaly_detector() {
     local target=$1
     cat > "$target" <<EOF
 #!/bin/bash
-ALERT_LOG="\${ANOMALY_ALERT_LOG:-/var/log/anomaly-detections.log}"
+ALERT_LOG="\${ANOMALY_ALERT_LOG:-${DU_SETUP_LOG_DIR}/anomaly-detections.log}"
+install -d -m 0750 "\$(dirname "\$ALERT_LOG")"
 send_alert(){ echo "[\$(date '+%Y-%m-%d %H:%M:%S')] ANOMALY: \$1" >> "\$ALERT_LOG"; }
 
 cpu=\$(LC_ALL=C top -bn1 | awk -F',' '
@@ -814,10 +816,9 @@ configure_anomaly_detection() {
 EOF
     chmod 644 /etc/cron.d/anomaly-detector
 
-    # Logrotate for anomaly detector log
-    if [ ! -f /etc/logrotate.d/anomaly-detector ]; then
-        cat > /etc/logrotate.d/anomaly-detector <<'EOF'
-/var/log/anomaly-detections.log {
+    # Reconcile logrotate with the managed log location.
+    cat > /etc/logrotate.d/anomaly-detector <<EOF
+${DU_SETUP_LOG_DIR}/anomaly-detections.log {
     daily
     rotate 14
     compress
@@ -825,8 +826,7 @@ EOF
     notifempty
 }
 EOF
-        chmod 644 /etc/logrotate.d/anomaly-detector
-    fi
+    chmod 644 /etc/logrotate.d/anomaly-detector
 
     print_success "Anomaly detection configured."
     log "Anomaly detection completed."

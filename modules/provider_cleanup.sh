@@ -15,7 +15,7 @@ cleanup_provider_packages() {
 
     # Validate required variables
     if [[ -z "${LOG_FILE:-}" ]]; then
-        LOG_FILE="/var/log/du_setup_$(date +%Y%m%d_%H%M%S).log"
+        LOG_FILE="${DU_SETUP_LOG_DIR:-/var/log/du-setup}/du_setup_$(date +%Y%m%d_%H%M%S).log"
         echo "Warning: LOG_FILE not set, using: $LOG_FILE"
     fi
 

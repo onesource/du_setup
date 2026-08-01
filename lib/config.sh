@@ -27,7 +27,7 @@ case "$LETSENCRYPT_ENVIRONMENT" in
 esac
 
 # --- Update Configuration ---
-CURRENT_VERSION="0.75.5_modular"
+CURRENT_VERSION="0.75.6_modular"
 SCRIPT_URL="https://raw.githubusercontent.com/onesource/du_setup/refs/heads/main/du_setup_modular.sh"
 CONFIG_URL="https://raw.githubusercontent.com/onesource/du_setup/refs/heads/main/lib/config.sh"
 CHECKSUM_URL="${SCRIPT_URL}.sha256"
@@ -35,9 +35,10 @@ REPOSITORY_API_URL="https://api.github.com/repos/onesource/du_setup/commits/main
 REPOSITORY_ARCHIVE_BASE="https://github.com/onesource/du_setup/archive"
 
 # --- Script Variables ---
-LOG_FILE="/var/log/du_setup_$(date +%Y%m%d_%H%M%S).log"
-BACKUP_LOG="/var/log/backup_rsync.log"
-REPORT_FILE="/var/log/du_setup_report_$(date +%Y%m%d_%H%M%S).txt"
+DU_SETUP_LOG_DIR="/var/log/du-setup"
+LOG_FILE="${DU_SETUP_LOG_DIR}/du_setup_$(date +%Y%m%d_%H%M%S).log"
+BACKUP_LOG="${DU_SETUP_LOG_DIR}/backup_rsync.log"
+REPORT_FILE="${DU_SETUP_LOG_DIR}/du_setup_report_$(date +%Y%m%d_%H%M%S).txt"
 VERBOSE=true
 NON_INTERACTIVE=false
 BACKUP_DIR="/root/setup_harden_backup_$(date +%Y%m%d_%H%M%S)"
@@ -138,10 +139,39 @@ PROC_THRESHOLD=300  # Default Processes 300
 DISK_THRESHOLD=90  # New: Disk usage %
 
 # --- Initialize Configuration ---
+migrate_legacy_du_setup_logs() {
+    local legacy_root="${1:-/var/log}" destination="${2:-$DU_SETUP_LOG_DIR}"
+    local pattern legacy_file nullglob_was_set=false
+    local patterns=(
+        'du_setup_*.log'
+        'du_setup_report_*.txt'
+        'setup_harden_security_audit_*.log'
+        'backup_rsync.log'
+        'security-analysis.log'
+        'anomaly-detections.log'
+        'du_setup_deploy.log'
+    )
+
+    install -d -m 0750 "$destination"
+    if [[ $EUID -eq 0 ]]; then
+        chown root:adm "$destination"
+    fi
+    shopt -q nullglob && nullglob_was_set=true
+    shopt -s nullglob
+    for pattern in "${patterns[@]}"; do
+        for legacy_file in "$legacy_root"/$pattern; do
+            [[ -f "$legacy_file" ]] || continue
+            mv --backup=numbered -- "$legacy_file" "$destination/"
+        done
+    done
+    [[ "$nullglob_was_set" == true ]] || shopt -u nullglob
+}
+
 init_config() {
     install -d -m 0700 "$DU_SETUP_ETC_DIR" "$DU_SETUP_STATE_DIR" \
         "$DU_SETUP_CREDENTIALS_DIR"
     install -d -m 0750 "$DU_SETUP_MANIFEST_DIR"
+    migrate_legacy_du_setup_logs
     printf '%s\n' "$STATE_SCHEMA_VERSION" > "${DU_SETUP_STATE_DIR}/schema_version"
     chmod 0600 "${DU_SETUP_STATE_DIR}/schema_version"
 

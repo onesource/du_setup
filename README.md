@@ -7,7 +7,7 @@
 
 -----
 
-**Version:** v0.75.5_modular
+**Version:** v0.75.6_modular
 
 **Last Updated:** 2026-08-01
 
@@ -88,7 +88,7 @@ The modular version deliberately owns generated snippets and state; direct edits
   * Tailscale (Mesh VPN)
   * Nginx Web Server (containerized or host-based)
   * Advanced security tools (AIDE)
-* **Comprehensive Logging**: Logs all actions to `/var/log/du_setup_*.log`.
+* **Comprehensive Logging**: Stores du_setup-owned logs and reports under `/var/log/du-setup/`; legacy files are migrated there without overwriting existing logs.
 * **Automation Safety**: `--quiet` never grants consent; `--non-interactive` preserves valid detected state and fails closed when required input is missing.
 
 -----
@@ -195,7 +195,7 @@ sudo -E ./du_setup_modular.sh --non-interactive
 | **Security Auditing** | Runs optional **Lynis** and **debsecan** vulnerability audits and logs the results for review. |
 | **Logging and Reporting** | Logs all actions and generates a detailed report of setup and cleanup in `/var/log` and backup directories. Saves timestamped backups of modified configuration files in `/root/setup_harden_backup_*`. |
 | **Cleanup & Maintenance** | Reports final service state and reloads systemd; package removal occurs only through the separately confirmed provider-cleanup workflow. |
-| **Final Summary** | Generates a detailed report of all changes and saves it to `/var/log/du_setup_report_*.txt`. |
+| **Final Summary** | Generates a detailed report of all changes and saves it to `/var/log/du-setup/du_setup_report_*.txt`. |
 
 -----
 
@@ -247,10 +247,10 @@ After rebooting, verify the setup:
   * Verify SSH key: `cat /root/.ssh/id_ed25519.pub`
   * Copy key (if not done): `ssh-copy-id -p <backup_port> -s <backup_user@backup_host>`
   * Test backup: `sudo /root/run_backup.sh`
-  * Check logs: `sudo less /var/log/backup_rsync.log`
+  * Check logs: `sudo less /var/log/du-setup/backup_rsync.log`
   * Verify cron job: `sudo crontab -l` (e.g., `5 3 * * * /root/run_backup.sh`)
 * **Security Audit** (if run):
-  * Check results: `sudo less /var/log/setup_harden_security_audit_*.log`
+  * Check results: `sudo less /var/log/du-setup/setup_harden_security_audit_*.log`
   * Review Lynis hardening index and debsecan vulnerabilities in the script’s summary output
 
 -----
@@ -273,7 +273,7 @@ After rebooting, verify the setup:
 * Maintain out-of-band console access in case of SSH lockout.
 * For Hetzner Storage Box, ensure `~/.ssh/` exists on the remote server: `ssh -p 23 <backup_user@backup_host> "mkdir -p ~/.ssh && chmod 700 ~/.ssh"`. Backups use SSH (port 23) for rsync, not SFTP.
 * For Tailscale, generate a pre-auth key from [https://login.tailscale.com/admin](https://login.tailscale.com/admin) (standard, must start with `tskey-auth-`) or your custom server (any valid key). Ensure UDP 41641 is open for Tailscale traffic.
-* For security audits, review `/var/log/setup_harden_security_audit_*.log` for Lynis and debsecan recommendations.
+* For security audits, review `/var/log/du-setup/setup_harden_security_audit_*.log` for Lynis and debsecan recommendations.
 
 -----
 
@@ -312,7 +312,7 @@ If backups fail:
       * For Hetzner: `sudo ssh -p 23 <backup_user@backup_host> "mkdir -p ~/.ssh && chmod 700 ~/.ssh"`
       * Test SSH: `sudo ssh -p <backup_port> <backup_user@backup_host> exit`
 2. **Check Logs**:
-      * Review: `sudo less /var/log/backup_rsync.log`
+      * Review: `sudo less /var/log/du-setup/backup_rsync.log`
       * If automated key copy fails: `cat /tmp/ssh-copy-id.log`
 3. **Test Backup Manually**:
 
@@ -336,7 +336,7 @@ If backups fail:
 If audits fail:
 
 1. **Check Audit Log**:
-      * Review: `sudo less /var/log/setup_harden_security_audit_*.log`
+      * Review: `sudo less /var/log/du-setup/setup_harden_security_audit_*.log`
       * Look for Lynis errors or debsecan CVE reports
 2. **Verify Installation**:
       * Lynis: `command -v lynis`

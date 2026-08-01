@@ -211,7 +211,7 @@ configure_security_audit() {
         return 0
     fi
 
-    AUDIT_LOG="/var/log/setup_harden_security_audit_$(date +%Y%m%d_%H%M%S).log"
+    AUDIT_LOG="${DU_SETUP_LOG_DIR}/setup_harden_security_audit_$(date +%Y%m%d_%H%M%S).log"
     touch "$AUDIT_LOG" && chmod 600 "$AUDIT_LOG"
     AUDIT_RAN=true
     HARDENING_INDEX=""

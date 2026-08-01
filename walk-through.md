@@ -20,7 +20,7 @@
   - The script starts with `#!/bin/bash` and `set -euo pipefail`, ensuring strict error handling.
 
 - **Log File Creation**:
-  - The script creates `/var/log/du_setup_$(date +%Y%m%d_%H%M%S).log` (e.g., `/var/log/du_setup_20250630_222800.log`) with `chmod 600`.
+  - The script creates `/var/log/du-setup/du_setup_$(date +%Y%m%d_%H%M%S).log` (e.g., `/var/log/du-setup/du_setup_20250630_222800.log`) with `chmod 600`.
   - Backup directory `/root/setup_harden_backup_20250630_222800` is created with `chmod 700`.\c
 
 #### **2. Main Function Execution**
@@ -260,10 +260,10 @@
   The root user's public key is: ssh-ed25519 AAAAC3Nza... root@myserver
   Run the following command: ssh-copy-id -p "23" -i "/root/.ssh/id_ed25519.pub" -s "u12345@u12345.your-storagebox.de"
   ✓ Rsync exclude file created.
-  ✓ Test backup successful! Check /var/log/backup_rsync.log for details.
+  ✓ Test backup successful! Check /var/log/du-setup/backup_rsync.log for details.
   ✓ Backup cron job scheduled: 5 3 * * *
   ```
-- **Potential Issues**: If the SSH key isn’t copied, the test backup fails, logged to `/var/log/backup_rsync.log`. Manual copy instructions are clear. No issues expected with correct setup.
+- **Potential Issues**: If the SSH key isn’t copied, the test backup fails, logged to `/var/log/du-setup/backup_rsync.log`. Manual copy instructions are clear. No issues expected with correct setup.
 
 ##### **configure_swap**
 - **Logic**: Configures a swap file if confirmed, with default size 2G.
@@ -290,11 +290,11 @@
   - User confirms audit.
   - Installs `lynis`, runs `lynis audit system --quick`.
   - Skips debsecan (Ubuntu 22.04, not supported).
-  - Logs to `/var/log/setup_harden_security_audit_20250630_222800.log`.
+  - Logs to `/var/log/du-setup/setup_harden_security_audit_20250630_222800.log`.
   - Extracts hardening index (e.g., `75`).
 - **Expected Output**:
   ```
-  ✓ Lynis audit completed. Check /var/log/setup_harden_security_audit_20250630_222800.log for details.
+  ✓ Lynis audit completed. Check /var/log/du-setup/setup_harden_security_audit_20250630_222800.log for details.
   ℹ debsecan is not supported on Ubuntu. Skipping debsecan audit.
   ```
 - **Potential Issues**: Lynis failure is logged and doesn’t exit the script. No issues expected.
@@ -340,10 +340,10 @@
       - Tailscale IPs: 100.64.0.1
       - Flags:         None
     Security Audit:  Performed
-      - Audit Log:     /var/log/setup_harden_security_audit_20250630_222800.log
+      - Audit Log:     /var/log/du-setup/setup_harden_security_audit_20250630_222800.log
       - Hardening Index: 75
       - Vulnerabilities: Not supported on Ubuntu
-    Log File:        /var/log/du_setup_20250630_222800.log
+    Log File:        /var/log/du-setup/du_setup_20250630_222800.log
     Backups:         /root/setup_harden_backup_20250630_222800
   Post-Reboot Verification Steps:
     - SSH access:       ssh -p 2222 adminuser@192.0.2.1
@@ -358,9 +358,9 @@
         - Verify SSH key: sudo cat /root/.ssh/id_ed25519.pub
         - Copy key if needed: ssh-copy-id -p 23 -s u12345@u12345.your-storagebox.de
         - Test backup:     sudo /root/run_backup.sh
-        - Check logs:      sudo less /var/log/backup_rsync.log
+        - Check logs:      sudo less /var/log/du-setup/backup_rsync.log
     - Security Audit:
-        - Check results:   sudo less /var/log/setup_harden_security_audit_20250630_222800.log
+        - Check results:   sudo less /var/log/du-setup/setup_harden_security_audit_20250630_222800.log
   ⚠ ACTION REQUIRED: Ensure the root SSH key (/root/.ssh/id_ed25519.pub) is copied to u12345@u12345.your-storagebox.de.
   ⚠ A reboot is required to apply all changes cleanly.
   Reboot now? [Y/n]: n
