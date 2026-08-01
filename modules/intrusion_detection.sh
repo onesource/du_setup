@@ -835,22 +835,9 @@ EOF
 # -----------------------
 # Auditd trimmed integration
 # -----------------------
-configure_auditd() {
-    print_section "auditd integration (trimmed rules)"
-
-    if ! confirm "Install and enable auditd?"; then
-        print_info "Skipping auditd."
-        return 0
-    fi
-
-    if ! is_installed auditd; then
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq auditd audispd-plugins
-    fi
-
-    AUDIT_RULES_FILE="/etc/audit/rules.d/99-security.rules"
-    # Write trimmed rules only if missing or different
-    AUDIT_RULES_TMP=$(mktemp)
-    cat > "${AUDIT_RULES_TMP}" <<'EOF'
+write_audit_rules() {
+    local target=$1 include_docker=${2:-false} include_nginx=${3:-false}
+    cat > "$target" <<'EOF'
 # Trimmed audit rules - high value events only
 # --- Identity and credential stores ---
 -w /etc/passwd -p wa -k identity
@@ -879,22 +866,37 @@ configure_auditd() {
 -a always,exit -F arch=b64 -S execve -k execs
 -a always,exit -F arch=b32 -S execve -k execs
 EOF
+    if [[ "$include_docker" == true ]]; then
+        printf '%s\n' '-w /usr/bin/docker -p x -k docker' >> "$target"
+    fi
+    if [[ "$include_nginx" == true ]]; then
+        printf '%s\n' '-w /etc/nginx -p wa -k nginx' >> "$target"
+    fi
+}
+
+configure_auditd() {
+    print_section "auditd integration (trimmed rules)"
+
+    if ! confirm "Install and enable auditd?"; then
+        print_info "Skipping auditd."
+        return 0
+    fi
+
+    if ! is_installed auditd; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq auditd audispd-plugins
+    fi
+
+    local AUDIT_RULES_FILE="/etc/audit/rules.d/99-security.rules"
+    local AUDIT_RULES_TMP include_docker=false include_nginx=false
+    # Write trimmed rules only if missing or different
+    AUDIT_RULES_TMP=$(mktemp)
+    command -v docker >/dev/null 2>&1 && include_docker=true
+    [[ -d /etc/nginx ]] && include_nginx=true
+    write_audit_rules "$AUDIT_RULES_TMP" "$include_docker" "$include_nginx"
 
     if [ ! -f "${AUDIT_RULES_FILE}" ] || ! cmp -s "${AUDIT_RULES_TMP}" "${AUDIT_RULES_FILE}"; then
         mv "${AUDIT_RULES_TMP}" "${AUDIT_RULES_FILE}"
         chmod 644 "${AUDIT_RULES_FILE}"
-
-        # Optional: Add Docker/Nginx if present (append to the rules file)
-        if command -v docker >/dev/null; then
-            if ! grep -q "-w /usr/bin/docker" "${AUDIT_RULES_FILE}"; then
-                echo "-w /usr/bin/docker -p x -k docker" >> "${AUDIT_RULES_FILE}"
-            fi
-        fi
-        if [ -d /etc/nginx ]; then
-            if ! grep -q "-w /etc/nginx" "${AUDIT_RULES_FILE}"; then
-                echo "-w /etc/nginx -p wa -k nginx" >> "${AUDIT_RULES_FILE}"
-            fi
-        fi
         augenrules --load >/dev/null 2>&1 || true
         print_info "Auditd rules updated."
     else

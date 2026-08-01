@@ -45,4 +45,10 @@ PATH="$mock_dir:$PATH" \
     "$temp_dir/anomaly-detector.sh"
 
 grep -q 'High CPU: 90.0%' "$temp_dir/alerts.log"
+
+write_audit_rules "$temp_dir/audit.rules" true true
+grep -Fxq -- '-w /usr/bin/docker -p x -k docker' "$temp_dir/audit.rules"
+grep -Fxq -- '-w /etc/nginx -p wa -k nginx' "$temp_dir/audit.rules"
+write_audit_rules "$temp_dir/audit.rules.second" true true
+cmp -s "$temp_dir/audit.rules" "$temp_dir/audit.rules.second"
 printf 'IDS generated helper tests passed\n'
