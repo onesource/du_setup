@@ -97,7 +97,7 @@ manage_certificates() {
             printf '  2) Setup Let'\''s Encrypt Certificate (includes auto-renewal option)%s\n' "$NC"
             printf '  3) Import Existing Certificate (3rd-party)%s\n' "$NC"
             printf '  4) View Certificate Status%s\n' "$NC"
-            printf '  5) Setup Auto-Renewal (cron + deploy-hook)%s\n' "$NC"
+            printf '  5) Setup Auto-Renewal (systemd timer + Certbot hooks)%s\n' "$NC"
             printf '  6) Regenerate HTTPS Configuration%s\n' "$NC"
             printf '  7) Delete Certificate%s\n' "$NC"
             printf '  8) Check Renewal Status%s\n' "$NC"
@@ -112,7 +112,7 @@ manage_certificates() {
                 2) setup_letsencrypt; break ;;
                 3) import_certificate; break ;;
                 4) view_certificate_status || true; break ;;
-                5) setup_auto_renewal_cron; break ;;      # <— canonical function
+                5) setup_auto_renewal; break ;;
                 6) regenerate_https_config; break ;;
                 7) delete_certificate; break ;;
                 8) check_renewal_status; break ;;
@@ -380,58 +380,15 @@ setup_letsencrypt() {
             fi
         fi
 
-        # Create renewal hook script (deploy-hook)
-        cat > /opt/nginx/certs/renewal_hook.sh << 'EOF'
-#!/bin/bash
-# Certbot deploy-hook for Nginx (container or system)
-set -euo pipefail
-
-# Copy renewed certificates
-if [[ -z "${RENEWED_LINEAGE:-}" ]]; then
-  echo "RENEWED_LINEAGE not set; this must be run as a Certbot deploy hook."
-  exit 0
-fi
-
-LINEAGE_DIR="$RENEWED_LINEAGE"
-DOMAIN_NAME="$(basename "$LINEAGE_DIR")"
-
-cp -L "$LINEAGE_DIR/fullchain.pem" /opt/nginx/certs/cert.pem
-cp -L "$LINEAGE_DIR/privkey.pem"   /opt/nginx/certs/key.pem
-
-# Set proper permissions
-chmod 644 /opt/nginx/certs/cert.pem
-chmod 600 /opt/nginx/certs/key.pem
-
-# Check if Docker nginx is running and set ownership
-if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'nginx'; then
-    chown 101:101 /opt/nginx/certs/cert.pem /opt/nginx/certs/key.pem
-else
-    chown root:root /opt/nginx/certs/cert.pem /opt/nginx/certs/key.pem
-fi
-
-# Reload Nginx - check if it's system or Docker
-if systemctl is-active --quiet nginx 2>/dev/null; then
-    # System nginx
-    systemctl reload nginx
-elif docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'nginx'; then
-    # Docker nginx
-    cd /opt/nginx && run_docker_compose exec -T nginx nginx -s reload
-fi
-
-echo "Certificate renewed for $DOMAIN_NAME at $(date -Iseconds)"
-EOF
-        chmod +x /opt/nginx/certs/renewal_hook.sh
-        print_success "Created renewal hook script at /opt/nginx/certs/renewal_hook.sh"
-
         # Update Nginx config
         regenerate_https_config "$DOMAIN"
 
-        # Offer to set up auto-renewal cron job (one global cron, not per-domain)
-        if confirm "Would you like to set up automatic certificate renewal (cron + deploy-hook)?"; then
-            print_info "Setting up auto-renewal cron job..."
-            setup_auto_renewal_cron
+        # Standalone renewal needs port 80, so Certbot hooks stop and restore
+        # Nginx around renewal and deploy the renewed lineage to its active path.
+        if confirm "Configure automatic renewal using certbot.timer and system hooks?"; then
+            setup_auto_renewal
         else
-            print_info "Auto-renewal cron job not set up. You can set it up later by selecting 'Setup Auto-Renewal' option."
+            print_info "Automatic renewal was not configured. You can set it up later with option 5."
         fi
 
         log "Let's Encrypt certificate generated for $DOMAIN"
@@ -451,154 +408,197 @@ EOF
     return 0
 }
 
-# --- Setup Auto-Renewal Cron Job ---
-setup_auto_renewal_cron() {
-    # --- Dependency Check ---
+# --- Remove obsolete root cron renewals without touching unrelated jobs ---
+remove_legacy_certbot_cron_jobs() {
+    local current_crontab filtered_crontab backup_path removed_count
+    current_crontab=$(mktemp)
+    filtered_crontab=$(mktemp)
+
+    if ! crontab -l > "$current_crontab" 2>/dev/null; then
+        rm -f "$current_crontab" "$filtered_crontab"
+        return 0
+    fi
+
+    removed_count=$(awk '
+        $0 !~ /^[[:space:]]*#/ &&
+        $0 ~ /(^|[[:space:]\/])certbot[[:space:]]+renew([[:space:]]|$)/ {
+            count++
+        }
+        END { print count + 0 }
+    ' "$current_crontab")
+
+    if [[ "$removed_count" -eq 0 ]]; then
+        rm -f "$current_crontab" "$filtered_crontab"
+        return 0
+    fi
+
+    awk '
+        !($0 !~ /^[[:space:]]*#/ &&
+          $0 ~ /(^|[[:space:]\/])certbot[[:space:]]+renew([[:space:]]|$)/)
+    ' "$current_crontab" > "$filtered_crontab"
+
+    backup_path="/root/crontab.before-certbot-system-hooks.$(date +%Y%m%d_%H%M%S)"
+    install -m 0600 -o root -g root "$current_crontab" "$backup_path"
+    if ! crontab "$filtered_crontab"; then
+        print_error "Could not remove legacy Certbot cron entries; the original crontab is in $backup_path."
+        rm -f "$current_crontab" "$filtered_crontab"
+        return 1
+    fi
+
+    rm -f "$current_crontab" "$filtered_crontab"
+    print_success "Removed $removed_count legacy Certbot cron renewal job(s)."
+    print_info "Previous root crontab retained at $backup_path."
+}
+
+# --- Install native Certbot hooks for standalone renewal ---
+configure_certbot_system_hooks() {
+    local hook_root=/etc/letsencrypt/renewal-hooks
+    local pre_hook="$hook_root/pre/10-du-setup-stop-nginx"
+    local deploy_hook="$hook_root/deploy/50-du-setup-deploy-nginx"
+    local post_hook="$hook_root/post/90-du-setup-start-nginx"
+    local staged
+
+    install -d -m 0755 -o root -g root \
+        "$hook_root/pre" "$hook_root/deploy" "$hook_root/post"
+
+    staged=$(mktemp)
+    cat > "$staged" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+state_file=/run/du-setup-certbot-nginx-mode
+rm -f "$state_file"
+
+if systemctl is-active --quiet nginx.service 2>/dev/null; then
+    systemctl stop nginx.service
+    printf '%s\n' system > "$state_file"
+elif command -v docker >/dev/null 2>&1 &&
+     [[ "$(docker inspect --format '{{.State.Running}}' nginx 2>/dev/null || true)" == "true" ]]; then
+    docker stop nginx >/dev/null
+    printf '%s\n' docker > "$state_file"
+fi
+EOF
+    install -m 0755 -o root -g root "$staged" "$pre_hook"
+
+    cat > "$staged" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+if [[ -z "${RENEWED_LINEAGE:-}" || -z "${RENEWED_DOMAINS:-}" ]]; then
+    echo "RENEWED_LINEAGE and RENEWED_DOMAINS are required." >&2
+    exit 1
+fi
+
+domain="${RENEWED_DOMAINS%% *}"
+if [[ ! "$domain" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
+    echo "Unsafe renewed domain: $domain" >&2
+    exit 1
+fi
+
+cert_dir=/opt/nginx/certs
+state_file=/run/du-setup-certbot-nginx-mode
+owner=root
+group=root
+if [[ -r "$state_file" ]] && [[ "$(<"$state_file")" == docker ]]; then
+    owner=101
+    group=101
+elif command -v docker >/dev/null 2>&1 && docker inspect nginx >/dev/null 2>&1; then
+    owner=101
+    group=101
+fi
+
+install -d -m 0755 -o root -g root "$cert_dir"
+install -m 0644 -o "$owner" -g "$group" \
+    "$RENEWED_LINEAGE/fullchain.pem" "$cert_dir/$domain.pem"
+install -m 0600 -o "$owner" -g "$group" \
+    "$RENEWED_LINEAGE/privkey.pem" "$cert_dir/$domain.key"
+
+echo "Deployed renewed certificate for $domain."
+EOF
+    install -m 0755 -o root -g root "$staged" "$deploy_hook"
+
+    cat > "$staged" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+state_file=/run/du-setup-certbot-nginx-mode
+[[ -r "$state_file" ]] || exit 0
+mode=$(<"$state_file")
+
+case "$mode" in
+    system)
+        systemctl start nginx.service
+        ;;
+    docker)
+        docker start nginx >/dev/null
+        ;;
+    *)
+        echo "Unknown saved Nginx mode: $mode" >&2
+        exit 1
+        ;;
+esac
+
+rm -f "$state_file"
+echo "Restored $mode Nginx after Certbot renewal."
+EOF
+    install -m 0755 -o root -g root "$staged" "$post_hook"
+    rm -f "$staged"
+
+    print_success "Installed Certbot pre/deploy/post hooks in $hook_root."
+}
+
+# --- Setup Auto-Renewal with certbot.timer and native hooks ---
+setup_auto_renewal() {
     if ! command -v certbot >/dev/null 2>&1; then
         print_error "Certbot is not installed. Please run 'Setup Let's Encrypt Certificate' (option 2) first."
         return 1
     fi
 
-    print_info "Setting up certificate auto-renewal cron job..."
-
-    # Ensure renewal hook script exists (deploy-hook style)
-    if [[ ! -f /opt/nginx/certs/renewal_hook.sh ]]; then
-        print_info "Creating renewal hook script..."
-        cat > /opt/nginx/certs/renewal_hook.sh << 'EOF'
-#!/bin/bash
-# Certbot deploy-hook for Nginx (system or Docker)
-set -euo pipefail
-
-# RENEWED_LINEAGE points to the live/ directory of the renewed cert
-if [[ -z "${RENEWED_LINEAGE:-}" ]]; then
-    echo "RENEWED_LINEAGE not set; this script must be run as a Certbot deploy hook."
-    exit 0
-fi
-
-LINEAGE_DIR="$RENEWED_LINEAGE"
-DOMAIN_NAME="$(basename "$LINEAGE_DIR")"
-
-# Copy renewed certificates into Nginx volume
-cp -L "$LINEAGE_DIR/fullchain.pem" /opt/nginx/certs/cert.pem
-cp -L "$LINEAGE_DIR/privkey.pem"   /opt/nginx/certs/key.pem
-
-# Set permissions
-chmod 644 /opt/nginx/certs/cert.pem
-chmod 600 /opt/nginx/certs/key.pem
-
-# Adjust ownership for container (UID 101) vs host
-if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'nginx'; then
-    chown 101:101 /opt/nginx/certs/cert.pem /opt/nginx/certs/key.pem
-else
-    chown root:root /opt/nginx/certs/cert.pem /opt/nginx/certs/key.pem
-fi
-
-# Reload Nginx - check if it's system or Docker
-if systemctl is-active --quiet nginx 2>/dev/null; then
-    # System nginx
-    systemctl reload nginx
-elif docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'nginx'; then
-    # Docker nginx
-    cd /opt/nginx && run_docker_compose exec -T nginx nginx -s reload
-fi
-
-echo "Certificate renewed for $DOMAIN_NAME at $(date -Iseconds)"
-EOF
-        chmod +x /opt/nginx/certs/renewal_hook.sh
+    print_info "Configuring certificate auto-renewal with certbot.timer..."
+    if ! systemctl cat certbot.timer >/dev/null 2>&1; then
+        print_error "certbot.timer is unavailable; automatic renewal was not scheduled."
+        return 1
     fi
-
-    local CRON_JOB="0 3 * * * /usr/bin/certbot renew --quiet --deploy-hook '/opt/nginx/certs/renewal_hook.sh'"
-
-    # Setup cron job for renewal (global, not per-domain)
-    if ! crontab -l 2>/dev/null | grep -q "certbot.*deploy-hook.*renewal_hook"; then
-        (crontab -l 2>/dev/null 2>&1 | grep -v "certbot.*deploy-hook"; \
-         echo "$CRON_JOB") | crontab -
-        print_success "Auto-renewal cron added: $CRON_JOB"
-    else
-        print_info "Auto-renewal cron already exists."
+    configure_certbot_system_hooks
+    if ! systemctl enable --now certbot.timer ||
+       ! systemctl is-active --quiet certbot.timer; then
+        print_error "certbot.timer could not be enabled; legacy cron renewals were preserved."
+        return 1
     fi
-    # Verify hook exists
-    if [[ ! -x /opt/nginx/certs/renewal_hook.sh ]]; then
-        print_warning "renewal_hook.sh missing. Run setup_letsencrypt first."
-    fi
+    print_success "certbot.timer is enabled and active."
+    remove_legacy_certbot_cron_jobs
 
-    # Optional: Test renewal configuration with a dry-run
     print_info "Testing renewal configuration (certbot renew --dry-run)..."
-
-    local nginx_was_running=false
-    local nginx_mode="none"
-    local restart_cmd=""
-
-    # Determine if nginx is running and define the appropriate restart command
-    if systemctl is-active --quiet nginx 2>/dev/null; then
-        nginx_was_running=true
-        nginx_mode="system"
-        restart_cmd="systemctl start nginx"
-    elif docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'nginx'; then
-        nginx_was_running=true
-        nginx_mode="docker"
-        restart_cmd="run_docker_compose -f /opt/nginx/docker-compose.yml start nginx"
-    fi
-
-    # Set a trap to restart nginx if the script exits unexpectedly
-    if [[ "$nginx_was_running" == "true" ]]; then
-        # The command string for the trap is fully resolved here
-        # shellcheck disable=SC2064
-        trap "print_error 'Script exited unexpectedly. Restarting Nginx to prevent downtime.' && $restart_cmd" EXIT
-
-        # Now, stop nginx
-        if [[ "$nginx_mode" == "system" ]]; then
-            systemctl stop nginx
-        elif [[ "$nginx_mode" == "docker" ]]; then
-            run_docker_compose -f /opt/nginx/docker-compose.yml stop nginx
-        fi
-    fi
-
-    # Temporarily disable exit on error to capture certbot's output and exit code
+    local errexit_was_set=false
+    [[ $- == *e* ]] && errexit_was_set=true
     set +e
     local dry_run_output
     dry_run_output=$(certbot renew --dry-run 2>&1)
     local test_result=$?
-    set -e # Re-enable exit on error if it was set
+    [[ "$errexit_was_set" == "true" ]] && set -e
 
-    # If we reach this point, the critical command has finished.
-    # We can now disable the trap and manually restore nginx if we stopped it.
-    if [[ "$nginx_was_running" == "true" ]]; then
-        trap - EXIT # Disable the trap
-        print_info "Restoring Nginx service..."
-        eval "$restart_cmd"
-        print_success "Nginx service restored."
-    fi
-
-    # Final Report
     if [[ $test_result -eq 0 ]]; then
         print_success "Auto-renewal setup dry-run completed successfully."
-        # Show output on success as well, it can contain useful info
-        if [[ -n "$dry_run_output" ]]; then
-            # shellcheck disable=SC2001
-            echo "$dry_run_output" | sed 's/^/    /'
-        fi
+        [[ -n "$dry_run_output" ]] && printf '%s\n' "$dry_run_output" | sed 's/^/    /'
         return 0
-    else
-        print_error "Renewal dry-run failed. See details below:"
-        # shellcheck disable=SC2001
-        echo "$dry_run_output" | sed 's/^/    /'
-        echo
-
-        if [[ "$dry_run_output" =~ "is broken" && "$dry_run_output" =~ "to be a symlink" ]]; then
-            print_warning "Certbot's configuration appears to be broken."
-            print_info "This typically happens if certificate files were moved or copied incorrectly."
-            print_info "To fix this, you should delete the broken certificate(s) and issue new ones."
-            echo
-            print_info "Recommended Steps:"
-            print_info "  1. Use option '7) Delete Certificate' from the menu to remove the affected domain(s)."
-            print_info "  2. Use option '2) Setup Let's Encrypt Certificate' to generate a fresh certificate."
-            print_info "  3. Finally, run this auto-renewal setup (option 5) again."
-        else
-            print_info "Please check the Certbot logs for more details: /var/log/letsencrypt/letsencrypt.log"
-        fi
-        return 1
     fi
+
+    print_error "Renewal dry-run failed. See details below:"
+    printf '%s\n' "$dry_run_output" | sed 's/^/    /'
+    echo
+
+    if [[ "$dry_run_output" =~ "is broken" && "$dry_run_output" =~ "to be a symlink" ]]; then
+        print_warning "Certbot's configuration appears to be broken."
+        print_info "Delete the broken certificate with option 7, issue it again with option 2, then rerun option 5."
+    else
+        print_info "Check /var/log/letsencrypt/letsencrypt.log for details."
+    fi
+    return 1
+}
+
+# Backward-compatible entry point for older callers.
+setup_auto_renewal_cron() {
+    setup_auto_renewal "$@"
 }
 
 # --- Import Existing Certificate ---

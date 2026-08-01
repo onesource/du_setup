@@ -18,12 +18,16 @@ DU_SETUP_CONFIG_LOADED=true
 ADMIN_EMAIL="admin@example.com"
 
 # Let's Encrypt Environment
-# Set to "staging" for testing to avoid rate limits.
-# Set to "production" for live certificates.
-LETSENCRYPT_ENVIRONMENT="staging"
+# Production certificates are the safe default for a production server.
+# Export LETSENCRYPT_ENVIRONMENT=staging explicitly for test deployments.
+LETSENCRYPT_ENVIRONMENT="${LETSENCRYPT_ENVIRONMENT:-production}"
+case "$LETSENCRYPT_ENVIRONMENT" in
+    production|staging) ;;
+    *) LETSENCRYPT_ENVIRONMENT="production" ;;
+esac
 
 # --- Update Configuration ---
-CURRENT_VERSION="0.75.0_modular"
+CURRENT_VERSION="0.75.1_modular"
 SCRIPT_URL="https://raw.githubusercontent.com/onesource/du_setup/refs/heads/main/du_setup_modular.sh"
 CONFIG_URL="https://raw.githubusercontent.com/onesource/du_setup/refs/heads/main/lib/config.sh"
 CHECKSUM_URL="${SCRIPT_URL}.sha256"

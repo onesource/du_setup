@@ -122,7 +122,7 @@ setup_backup() {
         else
             print_error "SSH connection test failed. Please ensure key was copied correctly and port is open."
             print_info "  - Copy key: ssh-copy-id -p \"$BACKUP_PORT\" -i \"$ROOT_SSH_KEY.pub\" $SSH_COPY_ID_FLAGS \"$BACKUP_DEST\""
-            print_info "  - Check port: nc -zv $(echo \"$BACKUP_DEST\" | cut -d'@' -f2) \"$BACKUP_PORT\""
+            print_info "  - Check port: nc -zv ${BACKUP_DEST#*@} $BACKUP_PORT"
             print_info "  - Ensure key is in ~/.ssh/authorized_keys on the backup server."
             if [[ -n "$SSH_COPY_ID_FLAGS" ]]; then
                 print_info "  - For Hetzner, ensure ~/.ssh/ exists on remote server: ssh -p \"$BACKUP_PORT\" \"$BACKUP_DEST\" \"mkdir -p ~/.ssh && chmod 700 ~/.ssh\""
@@ -289,7 +289,7 @@ EOF
         log "Failed to create backup script at $BACKUP_SCRIPT_PATH."
         return 1
     fi
-    if ! tee -a "$BACKUP_SCRIPT_PATH" > /dev/null <<'EOF'
+    if ! tee -a "$BACKUP_SCRIPT_PATH" > /dev/null <<EOF
 # --- BACKUP SCRIPT LOGIC ---
 send_notification() {
     local status="\$1" message="\$2" title color
@@ -309,7 +309,7 @@ exec 200>"\$LOCK_FILE"; flock -n 200 || { echo "Backup already running."; exit 1
 touch "\$LOG_FILE"; chmod 600 "\$LOG_FILE"; if [[ -f "\$LOG_FILE" && \$(stat -c%s "\$LOG_FILE") -gt 10485760 ]]; then mv "\$LOG_FILE" "\${LOG_FILE}.1"; fi
 echo "--- Starting Backup at \$(date) ---" >> "\$LOG_FILE"
 # --- RSYNC COMMAND ---
-rsync_output=\$(rsync -avz --delete --stats --exclude-from="\$EXCLUDE_FILE" -e "ssh -p \$SSH_PORT -o StrictHostKeyChecking=accept-new" "\${BACKUP_DIRS[@]}" "\${REMOTE_DEST}:\${REMOTE_PATH}" 2>&1)
+rsync_output=\$(rsync -rltvz --no-perms --no-owner --no-group --omit-dir-times --delete --stats --exclude-from="\$EXCLUDE_FILE" -e "ssh -p \$SSH_PORT -o StrictHostKeyChecking=accept-new" "\${BACKUP_DIRS[@]}" "\${REMOTE_DEST}:\${REMOTE_PATH}" 2>&1)
 rsync_exit_code=\$?; echo "\$rsync_output" >> "\$LOG_FILE"
 # --- NOTIFICATION ---
 if [[ \$rsync_exit_code -eq 0 ]]; then
@@ -321,10 +321,16 @@ else
     message="rsync failed with exit code \${rsync_exit_code}. Check log for details."
     send_notification "FAILURE" "\$message"
 fi
+exit "\$rsync_exit_code"
 EOF
     then
         print_error "Failed to append to backup script at $BACKUP_SCRIPT_PATH."
         log "Failed to append to backup script at $BACKUP_SCRIPT_PATH."
+        return 1
+    fi
+    if ! bash -n "$BACKUP_SCRIPT_PATH"; then
+        print_error "Generated backup script failed syntax validation."
+        log "Generated backup script failed syntax validation: $BACKUP_SCRIPT_PATH"
         return 1
     fi
     if ! chmod 700 "$BACKUP_SCRIPT_PATH"; then
@@ -428,13 +434,15 @@ test_backup() {
     local SSH_COMMAND="ssh -p $BACKUP_PORT -i $SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
 
     set +e
-    RSYNC_OUTPUT=$(timeout "$TIMEOUT_DURATION" rsync -avz -e "$SSH_COMMAND" "$TEST_FILE" "${BACKUP_DEST}:${REMOTE_BACKUP_PATH}" 2>&1)
+    RSYNC_OUTPUT=$(timeout "$TIMEOUT_DURATION" rsync -rltvz \
+        --no-perms --no-owner --no-group --omit-dir-times \
+        -e "$SSH_COMMAND" "$TEST_FILE" "${BACKUP_DEST}:${REMOTE_BACKUP_PATH}" 2>&1)
     RSYNC_EXIT_CODE=$?
     set -e
 
     {
         echo "--- Test Backup at $(date) ---"
-        echo "Command: rsync -avz -e \"$SSH_COMMAND\" \"$TEST_FILE\" \"${BACKUP_DEST}:${REMOTE_BACKUP_PATH}\""
+        echo "Command: rsync -rltvz --no-perms --no-owner --no-group --omit-dir-times -e \"$SSH_COMMAND\" \"$TEST_FILE\" \"${BACKUP_DEST}:${REMOTE_BACKUP_PATH}\""
         echo "Output:"
         echo "$RSYNC_OUTPUT"
         echo "Exit Code: $RSYNC_EXIT_CODE"

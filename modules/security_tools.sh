@@ -91,21 +91,14 @@ EOF
         # Show status of enabled jails for confirmation.
         fail2ban-client status | tee -a "$LOG_FILE"
 
-        # Verify SSH jail is using the correct port
-        local ssh_jail_port=$(fail2ban-client get sshd port 2>/dev/null || echo "unknown")
-        if [[ "$ssh_jail_port" == "$SSH_PORT" ]]; then
-            print_success "SSH jail is correctly monitoring port $SSH_PORT"
+        # The port is loaded from the managed jail file above. Fail2Ban does
+        # not expose a portable `get <jail> port` or `addport` command, so
+        # verify the jail itself loaded instead of issuing unsupported calls.
+        if fail2ban-client status sshd >/dev/null 2>&1; then
+            print_success "SSH jail is active with managed port $SSH_PORT."
         else
-            print_warning "SSH jail is monitoring port $ssh_jail_port (expected $SSH_PORT)"
-            print_info "Attempting to update SSH jail port..."
-            # Use correct fail2ban-client syntax to set port
-            fail2ban-client set sshd addport "$SSH_PORT" 2>/dev/null || true
-            # If that doesn't work, restart fail2ban to reapply configuration
-            if [[ "$ssh_jail_port" != "$SSH_PORT" ]]; then
-                print_info "Restarting Fail2Ban to apply port configuration..."
-                systemctl restart fail2ban
-                sleep 3
-            fi
+            print_error "Fail2Ban is active, but the sshd jail did not load."
+            FAILED_SERVICES+=("fail2ban:sshd")
         fi
     else
         print_error "Fail2Ban service failed to start. Check 'journalctl -u fail2ban' for errors."

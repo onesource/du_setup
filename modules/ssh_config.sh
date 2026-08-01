@@ -89,7 +89,9 @@ EOF
         return 1
     fi
 
-    current_effective_port=$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2; exit}')
+    # Consume all of sshd's output. Exiting awk early can send SIGPIPE to sshd
+    # and abort the installer with status 141 when pipefail is enabled.
+    current_effective_port=$(sshd -T 2>/dev/null | awk '$1 == "port" && !seen[$2]++ {print $2}')
     if [[ "$current_effective_port" != "$SSH_PORT" ]]; then
         print_error "Effective SSH port is $current_effective_port, expected $SSH_PORT. No reload performed."
         cp -a "$main_backup" "$main_config"

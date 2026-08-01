@@ -7,9 +7,9 @@
 
 -----
 
-**Version:** v0.75.0_modular
+**Version:** v0.75.1_modular
 
-**Last Updated:** 2026-07-28
+**Last Updated:** 2026-08-01
 
 **Compatible With:**
 
@@ -374,4 +374,3 @@ If Tailscale fails to connect:
 ## MIT [License](https://github.com/onesource/du_setup/blob/main/LICENSE)
 
 This script is open-source and provided "as is" without warranty. Use at your own risk.
-
