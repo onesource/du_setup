@@ -58,6 +58,10 @@ jobs:
         shell: bash
         run: bash tests/test_nginx_domain_routes.sh
 
+      - name: Test version metadata consistency
+        shell: bash
+        run: bash tests/test_version_metadata.sh
+
       - name: Run ShellCheck errors gate
         shell: bash
         run: shellcheck -x --severity=error du_setup_modular.sh lib/*.sh modules/*.sh

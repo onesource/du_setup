@@ -1,6 +1,6 @@
 # Changelog for du_setup_modular.sh
 
-## Unreleased
+## Version 0.75.7_modular | 2026-08-02
 
 - Preserved per-domain Nginx application routing in standalone snippets so certificate configuration regeneration no longer replaces static-site or reverse-proxy routes.
 
