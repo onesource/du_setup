@@ -72,6 +72,41 @@ escape_nginx_config() {
     echo "$input" | sed 's/[\/&\\]/\\&/g'
 }
 
+# Create the application-routing portion of a domain config once. Certificate
+# operations may safely regenerate the surrounding TLS server block without
+# replacing an operator's static-site or reverse-proxy configuration.
+ensure_nginx_domain_route() {
+    local domain="$1"
+    local route_dir="$2"
+    local root_dir="$3"
+    local route_file="$route_dir/$domain.inc"
+
+    validate_domain "$domain" || return 1
+    mkdir -p "$route_dir"
+    chmod 755 "$route_dir"
+
+    if [[ -e "$route_file" && ! -f "$route_file" ]]; then
+        print_error "Domain route path is not a regular file: $route_file"
+        return 1
+    fi
+
+    if [[ -f "$route_file" ]]; then
+        print_info "Preserving existing domain route: $route_file"
+        return 0
+    fi
+
+    cat > "$route_file" << EOF
+# Application routing for $domain.
+# This file is created once and is not overwritten by certificate operations.
+location / {
+    root $root_dir;
+    try_files \$uri \$uri/ =404;
+}
+EOF
+    chmod 644 "$route_file"
+    print_success "Created persistent domain route: $route_file"
+}
+
 # ============================================================================
 # Certificate Management Functions
 # ============================================================================
@@ -931,6 +966,8 @@ update_nginx_https_config() {
     # Always use /opt/nginx/certs paths (mount point)
     local CERT_PATH="/etc/nginx/certs/$DOMAIN.pem"
     local KEY_PATH="/etc/nginx/certs/$DOMAIN.key"
+    local ROUTE_DIR="$CONFIG_DIR/routes"
+    local ROUTE_INCLUDE_PATH="/etc/nginx/conf.d/routes/$DOMAIN.inc"
 
     if systemctl is-active --quiet nginx 2>/dev/null; then
         NGINX_TYPE="system"
@@ -942,12 +979,16 @@ update_nginx_https_config() {
         # System nginx uses standard paths (no /opt/nginx/certs mount)
         CERT_PATH="/opt/nginx/certs/$DOMAIN.pem"
         KEY_PATH="/opt/nginx/certs/$DOMAIN.key"
+        ROUTE_DIR="/etc/nginx/snippets/du-setup-routes"
+        ROUTE_INCLUDE_PATH="$ROUTE_DIR/$DOMAIN.inc"
         # Ensure system nginx (www-data) can read certs
         chown root:www-data /opt/nginx/certs /opt/nginx/certs/*
         chmod 750 /opt/nginx/certs
         chmod 640 "/opt/nginx/certs/$DOMAIN.pem"
         chmod 600 "/opt/nginx/certs/$DOMAIN.key"
     fi
+
+    ensure_nginx_domain_route "$DOMAIN" "$ROUTE_DIR" "$ROOT_DIR" || return 1
 
     # Legacy Cleanup: Remove or backup the old non-domain-specific config
     if [[ -f "$CONFIG_DIR/https.conf" ]]; then
@@ -1021,8 +1062,8 @@ server {
     # Block access to configuration files
     location ~* \.(conf|config|ini|log|sql|sh|py|pl)\$ { deny all; access_log off; log_not_found off; }
 
-    # Main location
-    location / { try_files \$uri \$uri/ =404; }
+    # Application routing is intentionally stored outside this generated file.
+    include $ROUTE_INCLUDE_PATH;
 
     # Nginx status (restricted to localhost)
     location /nginx_status {
@@ -1157,6 +1198,8 @@ regenerate_https_config() {
     local EXT_HTTP_PORT=80   EXT_HTTPS_PORT=443
     local ROOT_DIR="/usr/share/nginx/html" CONFIG_DIR="/opt/nginx/conf.d"
     local TEST_CMD="docker exec nginx nginx -t -c /etc/nginx/nginx.conf" RELOAD_CMD="reload_nginx_service"
+    local ROUTE_DIR="$CONFIG_DIR/routes"
+    local ROUTE_INCLUDE_PATH="/etc/nginx/conf.d/routes/$DOMAIN.inc"
     local CERT_PATH_IN_CONTAINER
     CERT_PATH_IN_CONTAINER="/etc/nginx/certs/$(basename "$ACTUAL_CERT")"
     local KEY_PATH_IN_CONTAINER
@@ -1170,7 +1213,11 @@ regenerate_https_config() {
         TEST_CMD="nginx -t" RELOAD_CMD="systemctl reload nginx"
         CERT_PATH_IN_CONTAINER="$ACTUAL_CERT"
         KEY_PATH_IN_CONTAINER="$ACTUAL_KEY"
+        ROUTE_DIR="/etc/nginx/snippets/du-setup-routes"
+        ROUTE_INCLUDE_PATH="$ROUTE_DIR/$DOMAIN.inc"
     fi
+
+    ensure_nginx_domain_route "$DOMAIN" "$ROUTE_DIR" "$ROOT_DIR" || return 1
 
     # 4. Backup existing
     local CONFIG_FILE="$CONFIG_DIR/$DOMAIN.conf"
@@ -1274,8 +1321,8 @@ server {
     # Block access to configuration files
     location ~* \.(conf|config|ini|log|sql|sh|py|pl)\$ { deny all; access_log off; log_not_found off; }
 
-    # Main location
-    location / { try_files \$uri \$uri/ =404; }
+    # Application routing is intentionally stored outside this generated file.
+    include $ROUTE_INCLUDE_PATH;
 
     # Nginx status (restricted to localhost)
     location /nginx_status {

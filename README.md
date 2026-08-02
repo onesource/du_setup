@@ -69,6 +69,8 @@ The modular version deliberately owns generated snippets and state; direct edits
   * Let's Encrypt integration with automatic renewal
   * Certificate import functionality for existing certificates
   * Certificate expiration monitoring and alerts
+  * Persistent per-domain route snippets keep static-site or reverse-proxy routing intact when certificate configuration is regenerated
+  * Container routes are stored in `/opt/nginx/conf.d/routes/<domain>.inc`; host Nginx routes are stored in `/etc/nginx/snippets/du-setup-routes/<domain>.inc`
 * **Nginx Security Monitoring**: Comprehensive monitoring and alerting:
   * Log analysis with attack pattern detection
   * Fail2Ban integration for Nginx-specific rules

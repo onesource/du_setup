@@ -1,5 +1,9 @@
 # Changelog for du_setup_modular.sh
 
+## Unreleased
+
+- Preserved per-domain Nginx application routing in standalone snippets so certificate configuration regeneration no longer replaces static-site or reverse-proxy routes.
+
 ## Version 0.75.0-modular  Reconciler safety redesign | 2026-07-28
 
 - Added persistent root-owned intent state and managed-administrator migration/validation.
