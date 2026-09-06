@@ -27,7 +27,7 @@ case "$LETSENCRYPT_ENVIRONMENT" in
 esac
 
 # --- Update Configuration ---
-CURRENT_VERSION="0.75.7_modular"
+CURRENT_VERSION="0.75.8_modular"
 SCRIPT_URL="https://raw.githubusercontent.com/onesource/du_setup/refs/heads/main/du_setup_modular.sh"
 CONFIG_URL="https://raw.githubusercontent.com/onesource/du_setup/refs/heads/main/lib/config.sh"
 CHECKSUM_URL="${SCRIPT_URL}.sha256"
@@ -58,6 +58,7 @@ STATE_SCHEMA_VERSION="1"
 CLEANUP_PREVIEW=false
 CLEANUP_ONLY=false
 SKIP_CLEANUP=false
+NGINX_SECURITY_ONLY=false
 
 # --- Environment Detection Variables ---
 DETECTED_VIRT_TYPE=""

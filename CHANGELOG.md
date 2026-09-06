@@ -1,5 +1,11 @@
 # Changelog for du_setup_modular.sh
 
+## Version 0.75.8_modular | 2026-09-06
+
+- Added `--nginx-security` maintenance mode for certificate, monitoring, and vulnerability tasks without rerunning the full installer.
+- Simplified routine certificate management and grouped infrequent recovery/import actions under an Advanced submenu.
+- Kept certificate menus active after cancellations or operation failures, including a declined unresolved-DNS override.
+
 ## Version 0.75.7_modular | 2026-08-02
 
 - Preserved per-domain Nginx application routing in standalone snippets so certificate configuration regeneration no longer replaces static-site or reverse-proxy routes.

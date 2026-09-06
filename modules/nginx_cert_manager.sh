@@ -113,8 +113,6 @@ EOF
 
 # --- Certificate Management Function ---
 manage_certificates() {
-    local single_run="${1:-false}"  # If true, run once and return (for "All Security Features")
-
     while true; do
         print_section "SSL/TLS Certificate Management"
 
@@ -126,52 +124,60 @@ manage_certificates() {
             chmod 755 /opt/nginx/certs
         fi
 
-        while true; do
-            printf '%s\n' "${CYAN}Certificate Management Options:${NC}"
-            printf '  0) Return to Security Configuration Menu%s\n' "$NC"
-            printf '  1) Generate Self-Signed Certificate (for testing)%s\n' "$NC"
-            printf '  2) Setup Let'\''s Encrypt Certificate (includes auto-renewal option)%s\n' "$NC"
-            printf '  3) Import Existing Certificate (3rd-party)%s\n' "$NC"
-            printf '  4) View Certificate Status%s\n' "$NC"
-            printf '  5) Setup Auto-Renewal (systemd timer + Certbot hooks)%s\n' "$NC"
-            printf '  6) Regenerate HTTPS Configuration%s\n' "$NC"
-            printf '  7) Delete Certificate%s\n' "$NC"
-            printf '  8) Check Renewal Status%s\n' "$NC"
+        printf '%s\n' "${CYAN}Certificate Management Options:${NC}"
+        printf '  0) Return to Security Configuration Menu%s\n' "$NC"
+        printf '  1) Add Let'\''s Encrypt Certificate%s\n' "$NC"
+        printf '  2) View Certificate Status%s\n' "$NC"
+        printf '  3) Test Automatic Renewal (dry run)%s\n' "$NC"
+        printf '  4) Advanced Certificate Options%s\n' "$NC"
 
-            read -rp "$(printf '%s' "${CYAN}Enter choice (0-8): ${NC}")" CERT_CHOICE
-            case $CERT_CHOICE in
-                0)
-                    print_info "Returning to security configuration menu..."
-                    return 0
-                    ;;
-                1) generate_self_signed_cert; break ;;
-                2) setup_letsencrypt; break ;;
-                3) import_certificate; break ;;
-                4) view_certificate_status || true; break ;;
-                5) setup_auto_renewal; break ;;
-                6) regenerate_https_config; break ;;
-                7) delete_certificate; break ;;
-                8) check_renewal_status; break ;;
-                *)
-                    print_error "Invalid choice. Please enter 0-8."
-                    continue
-                    ;;
-            esac
-        done
+        read -rp "$(printf '%s' "${CYAN}Enter choice (0-4): ${NC}")" CERT_CHOICE
+        case $CERT_CHOICE in
+            0)
+                print_info "Returning to security configuration menu..."
+                return 0
+                ;;
+            1) run_certificate_task "Let's Encrypt setup" setup_letsencrypt ;;
+            2) run_certificate_task "certificate status" view_certificate_status ;;
+            3) run_certificate_task "renewal test" check_renewal_status ;;
+            4) manage_advanced_certificates ;;
+            *) print_error "Invalid choice. Please enter 0-4." ;;
+        esac
+    done
+}
 
-        # If single_run mode (called from "All Security Features"), exit after one task
-        if [[ "$single_run" == "true" ]]; then
-            return 0
-        fi
+# Keep an individual certificate operation from terminating the interactive
+# maintenance session under the installer's global `set -e` error handling.
+run_certificate_task() {
+    local description="$1"
+    shift
+    if ! "$@"; then
+        print_warning "The $description did not complete. Returning to certificate options."
+    fi
+}
 
-        # Ask if user wants to continue
-        echo
-        read -rp "$(printf '%s' "${CYAN}Would you like to perform another certificate management task? (y/n): ${NC}")" ANOTHER_CERT_CHOICE
-        if [[ ! "$ANOTHER_CERT_CHOICE" =~ ^[Yy]$ ]]; then
-            print_info "Exiting Nginx certificate management setup..."
-            return 0
-        fi
-        echo
+manage_advanced_certificates() {
+    while true; do
+        print_section "Advanced Certificate Options"
+        printf '  0) Return to Certificate Management%s\n' "$NC"
+        printf '  1) Generate Self-Signed Certificate (testing only)%s\n' "$NC"
+        printf '  2) Import Existing Certificate (third-party)%s\n' "$NC"
+        printf '  3) Configure Auto-Renewal Timer and Hooks%s\n' "$NC"
+        printf '  4) Regenerate HTTPS Configuration%s\n' "$NC"
+        printf '  5) Deploy Existing Let'\''s Encrypt Certificate%s\n' "$NC"
+        printf '  6) Delete Certificate%s\n' "$NC"
+
+        read -rp "$(printf '%s' "${CYAN}Enter choice (0-6): ${NC}")" ADVANCED_CERT_CHOICE
+        case $ADVANCED_CERT_CHOICE in
+            0) return 0 ;;
+            1) run_certificate_task "self-signed certificate setup" generate_self_signed_cert ;;
+            2) run_certificate_task "certificate import" import_certificate ;;
+            3) run_certificate_task "auto-renewal setup" setup_auto_renewal ;;
+            4) run_certificate_task "HTTPS configuration regeneration" regenerate_https_config ;;
+            5) run_certificate_task "existing certificate deployment" deploy_existing_lineage ;;
+            6) run_certificate_task "certificate deletion" delete_certificate ;;
+            *) print_error "Invalid choice. Please enter 0-6." ;;
+        esac
     done
 }
 
@@ -319,11 +325,9 @@ setup_letsencrypt() {
     if [ -d "/etc/letsencrypt/live/$DOMAIN" ]; then
         print_warning "Certificate already exists for $DOMAIN"
         print_info "Certificate directory: /etc/letsencrypt/live/$DOMAIN"
-
-        if ! confirm "Issue a new one anyway? (This will create a $DOMAIN-0001 folder)"; then
-            print_info "Skipping certificate generation."
-            return 0
-        fi
+        print_info "Use Advanced Certificate Options > Deploy Existing Let's Encrypt Certificate to reinstall it."
+        print_info "No duplicate certificate lineage will be created."
+        return 0
     fi
 
     # Get email for renewal notices
@@ -340,7 +344,8 @@ setup_letsencrypt() {
         print_warning "Domain $DOMAIN does not currently resolve to an IPv4 address."
         print_info "Please ensure DNS is properly configured before proceeding."
         if ! confirm "Continue anyway? (Standalone mode will likely fail)"; then
-            return 1
+            print_info "Let's Encrypt setup cancelled. Returning to certificate options."
+            return 0
         fi
 
     fi
@@ -374,6 +379,7 @@ setup_letsencrypt() {
 
     if certbot certonly --standalone \
         $CERTBOT_FLAGS \
+        --cert-name "$DOMAIN" \
         --email "$EMAIL" \
         --agree-tos \
         --no-eff-email \
@@ -1595,9 +1601,13 @@ deploy_existing_lineage() {
         print_info "Activating certificate for: $selected_lineage"
 
         # Define paths
+        local primary_domain="$selected_lineage"
+        if [[ "$selected_lineage" =~ ^(.+)-[0-9]{4}$ ]]; then
+            primary_domain="${BASH_REMATCH[1]}"
+        fi
         local src_dir="/etc/letsencrypt/live/$selected_lineage"
-        local target_cert="/opt/nginx/certs/$selected_lineage.pem"
-        local target_key="/opt/nginx/certs/$selected_lineage.key"
+        local target_cert="/opt/nginx/certs/$primary_domain.pem"
+        local target_key="/opt/nginx/certs/$primary_domain.key"
 
         # Copy the files
         cp "$src_dir/fullchain.pem" "$target_cert"
@@ -1613,15 +1623,10 @@ deploy_existing_lineage() {
         chmod 600 "$target_key"
 
         # 3. Update Nginx Config
-        # Extract the primary domain (stripping -0001 suffixes for the Nginx server_name)
-        # Note: We keep the filename as $selected_lineage for uniqueness
-        # shellcheck disable=SC2001
-        echo "$selected_lineage" | sed 's/-[0-9]\{4\}$//' >/dev/null
-
-        update_nginx_https_config "$selected_lineage"
+        update_nginx_https_config "$primary_domain"
         reload_nginx_service
 
-        print_success "Successfully deployed $selected_lineage to active Nginx config."
+        print_success "Successfully deployed $selected_lineage as $primary_domain."
     else
         print_error "Invalid selection."
     fi

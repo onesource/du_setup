@@ -7,9 +7,9 @@
 
 -----
 
-**Version:** v0.75.7_modular
+**Version:** v0.75.8_modular
 
-**Last Updated:** 2026-08-02
+**Last Updated:** 2026-09-06
 
 **Compatible With:**
 
@@ -71,6 +71,7 @@ The modular version deliberately owns generated snippets and state; direct edits
   * Certificate expiration monitoring and alerts
   * Persistent per-domain route snippets keep static-site or reverse-proxy routing intact when certificate configuration is regenerated
   * Container routes are stored in `/opt/nginx/conf.d/routes/<domain>.inc`; host Nginx routes are stored in `/etc/nginx/snippets/du-setup-routes/<domain>.inc`
+  * After the initial installation, run `sudo -E ./du_setup_modular.sh --nginx-security` to manage additional sites and certificates without repeating the full server setup
 * **Nginx Security Monitoring**: Comprehensive monitoring and alerting:
   * Log analysis with attack pattern detection
   * Fail2Ban integration for Nginx-specific rules

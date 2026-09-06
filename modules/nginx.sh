@@ -120,8 +120,6 @@ configure_nginx_security() {
                 # shellcheck disable=SC1091
                 source "$(dirname "${BASH_SOURCE[0]}")/nginx_cert_manager.sh"
                 manage_certificates
-                read -rp "$(printf '%s' "${CYAN}Another security task? (y/n): ${NC}")" continue_reply
-                [[ "$continue_reply" =~ ^[Nn] ]] && return 0
                 ;;
             2)
                 # shellcheck disable=SC1091

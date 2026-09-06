@@ -31,6 +31,7 @@ show_usage() {
     printf "\n%sOperational Modes:%s\n" "$BOLD" "$NC"
     printf "  %-22s %s\n" "--cleanup-preview" "Show which provider packages/users would be cleaned without making changes."
     printf "  %-22s %s\n" "--cleanup-only" "Run only the provider cleanup function (for existing servers)."
+    printf "  %-22s %s\n" "--nginx-security" "Open Nginx security and certificate management only."
 
     printf "\n%sModifiers:%s\n" "$BOLD" "$NC"
     printf "  %-22s %s\n" "--skip-cleanup" "Skip provider cleanup entirely during a full setup run."
@@ -43,6 +44,8 @@ show_usage() {
     printf "  %ssudo -E ./%s%s\n" "$YELLOW" "$(basename "$0")" "$NC"
     printf "  # Preview provider cleanup actions without applying them\n"
     printf "  %ssudo -E ./%s --cleanup-preview%s\n" "$YELLOW" "$(basename "$0")" "$NC"
+    printf "  # Manage Nginx sites, certificates, monitoring, and scans only\n"
+    printf "  %ssudo -E ./%s --nginx-security%s\n" "$YELLOW" "$(basename "$0")" "$NC"
 
     printf "\n"
     exit 0
@@ -55,6 +58,7 @@ while [[ $# -gt 0 ]]; do
         --non-interactive) NON_INTERACTIVE=true; shift ;;
         --cleanup-preview) CLEANUP_PREVIEW=true; shift ;;
         --cleanup-only) CLEANUP_ONLY=true; shift ;;
+        --nginx-security) NGINX_SECURITY_ONLY=true; shift ;;
         --skip-cleanup) SKIP_CLEANUP=true; shift ;;
         -h|--help) show_usage ;;
         *)
@@ -158,6 +162,20 @@ main() {
 
     # Print header
     print_header
+
+    # This maintenance mode intentionally skips the full server installer.
+    if [[ "$NGINX_SECURITY_ONLY" == "true" ]]; then
+        if ! command -v nginx >/dev/null 2>&1 &&
+           ! { command -v docker >/dev/null 2>&1 && docker inspect nginx >/dev/null 2>&1; }; then
+            print_error "No existing system or containerized Nginx installation was found."
+            print_info "Run the full setup once before using --nginx-security."
+            return 1
+        fi
+        print_info "Running Nginx security maintenance only; the full server setup will be skipped."
+        configure_nginx_security
+        print_success "Nginx security maintenance completed."
+        return 0
+    fi
 
     # --- PRELIMINARY CHECKS ---
     check_system
