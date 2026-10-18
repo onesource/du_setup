@@ -109,14 +109,14 @@ Docker cannot change IPAM on a live network. On a new `nginx-network`, dynamic a
 Applying the range is a planned maintenance-window step and needs George's approval. Do not use `docker network rm` or `docker network create`. A network created outside Compose can make the next `docker compose up` fail on a label mismatch.
 
 1. Detach every other stack from `nginx_nginx-network` with `down` or `rm`, not `stop`. A stopped container keeps the old network ID, and a later `docker start` fails after the network is recreated. `docker network inspect nginx_nginx-network` lists attached containers. Remove anything else it lists the same way. Continue only when `Containers` is empty.
-   * SweetSaving: `systemctl stop sweetsaving-compose`. If inspect still lists its containers, remove them from `/opt/sweetsaving` with the same flags used to bring it back:
+   * SweetSaving: `systemctl stop sweetsaving-compose`. That does nothing if the unit is not active. In that case, or if inspect still lists its containers, run this from `/opt/sweetsaving`:
 
      ```bash
      docker compose --env-file .env.local -f docker-compose.yml -f compose.production.yml down
      ```
 
      A plain `docker compose up -d` drops the `.3` and `.5` pins and publishes ports 8180, 4100, and 4101 on all interfaces.
-   * AlphaEngine ui is profile-gated. From `/opt/AlphaEngine`, remove it with `docker compose --profile ui rm ui`. Do not use `docker compose --profile ui stop ui`, and do not run `docker compose down` without `--profile ui`. Never start the worker or refresh profiles in this procedure.
+   * AlphaEngine ui is profile-gated. From `/opt/AlphaEngine`, remove it with `docker compose --profile ui rm -s -f ui` so a running ui is stopped and removed without a prompt. Do not use `docker compose --profile ui stop ui`, and do not run `docker compose down` without `--profile ui`. Never start the worker or refresh profiles in this procedure.
 
 2. Recreate the Nginx network only after that inspect lists no attached containers. On a legacy host the compose file still has the subnet-only IPAM block, so `down` then `up -d` recreates `nginx_nginx-network` without `ip_range`.
    * Before `up -d`, edit `/opt/nginx/docker-compose.yml` so the network IPAM is `subnet: 172.20.0.0/16`, `ip_range: 172.20.128.0/17`, and `gateway: 172.20.0.1`.
@@ -134,7 +134,7 @@ Applying the range is a planned maintenance-window step and needs George's appro
 
    * AlphaEngine, from `/opt/AlphaEngine`: `make docker-up`, or `docker compose --profile ui up -d ui`. Never start the worker or refresh profiles.
 
-4. Verify with `docker network inspect nginx_nginx-network`. `IPAM.Config` must show `IPRange` `172.20.128.0/17`. Nginx must be `172.20.0.2`, the sweetsaving frontend `172.20.0.3`, AlphaEngine ui `172.20.0.4`, and the sweetsaving backend `172.20.0.5`. Then confirm the sweetsaving public URL and `https://www.myalphaengine.com/healthz` both return healthy.
+4. Verify with `docker network inspect nginx_nginx-network`. `IPAM.Config` must show `IPRange` `172.20.128.0/17`. Nginx must be `172.20.0.2`, the sweetsaving frontend `172.20.0.3`, AlphaEngine ui `172.20.0.4`, and the sweetsaving backend `172.20.0.5`. Then confirm `https://www.sweetsaving.com` and `https://www.myalphaengine.com/healthz` both return healthy.
 
 -----
 
