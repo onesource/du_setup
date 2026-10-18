@@ -152,6 +152,109 @@ configure_nginx_security() {
     done
 }
 
+# absent: nginx_nginx-network does not exist.
+# current: the live network already has ip_range 172.20.128.0/17.
+# legacy: the network exists without that range.
+nginx_live_network_ipam_state() {
+    local config
+    if ! config=$(docker network inspect nginx_nginx-network --format '{{json .IPAM.Config}}' 2>/dev/null); then
+        printf 'absent\n'
+        return 0
+    fi
+    if [[ "$config" == *172.20.128.0/17* ]]; then
+        printf 'current\n'
+    else
+        printf 'legacy\n'
+    fi
+}
+
+nginx_compose_ipam_yaml() {
+    local state="$1"
+    if [[ "$state" == "legacy" ]]; then
+        printf '%s\n' '        # Live network has no ip_range. Left unchanged so Compose does not recreate it.' \
+            '        - subnet: 172.20.0.0/16'
+        return 0
+    fi
+    printf '%s\n' '        - subnet: 172.20.0.0/16' \
+        '          ip_range: 172.20.128.0/17' \
+        '          gateway: 172.20.0.1'
+}
+
+warn_legacy_nginx_network() {
+    print_warning "nginx_nginx-network already exists without ip_range 172.20.128.0/17. Skipping network changes so Compose does not recreate nginx_nginx-network and take Nginx down. Recreate nginx_nginx-network manually in a planned maintenance window to reserve 172.20.0.2-172.20.127.254 for static pins."
+}
+
+# Write the container Compose file. An existing network without ip_range keeps
+# the subnet-only block so a later `docker compose up` does not recreate it.
+write_nginx_container_compose() {
+    local dest="$1"
+    local network_state ipam_yaml
+    network_state=$(nginx_live_network_ipam_state)
+    if [[ "$network_state" == "legacy" ]]; then
+        warn_legacy_nginx_network
+    fi
+    ipam_yaml=$(nginx_compose_ipam_yaml "$network_state")
+    cat > "$dest" << EOF
+services:
+  nginx:
+    build: .
+    container_name: nginx
+    restart: unless-stopped
+    ports:
+      - "80:8080"
+      - "443:8443"
+      - "8080:8082"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./conf.d:/etc/nginx/conf.d:ro
+      - ./html:/usr/share/nginx/html:ro
+      - ./dashboard:/opt/nginx/dashboard:ro
+      - ./logs:/var/log/nginx
+      - ./certs:/etc/nginx/certs:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro  # Optional LE mount
+    networks:
+      nginx-network:
+        ipv4_address: 172.20.0.2
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+    ulimits:
+      nproc: 65535
+      nofile:
+        soft: 20000
+        hard: 40000
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          cpus: '0.1'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: 3
+
+networks:
+  nginx-network:
+    driver: bridge
+    ipam:
+      config:
+${ipam_yaml}
+EOF
+}
+
 # --- Containerized Nginx Installation ---
 install_nginx_container() {
     if ! docker compose version >/dev/null 2>&1; then
@@ -517,69 +620,10 @@ EOF
 
     print_info "Note: Standard Dockerfile uses nginxinc/nginx-unprivileged:alpine image (recommended for security)."
 
-    # Create secure Docker Compose file
+    # Create secure Docker Compose file. A live network without ip_range keeps
+    # its current IPAM so Compose does not recreate the network on rerun.
     print_info "Creating secure Docker Compose configuration..."
-    cat > /opt/nginx/docker-compose.yml << 'EOF'
-services:
-  nginx:
-    build: .
-    container_name: nginx
-    restart: unless-stopped
-    ports:
-      - "80:8080"
-      - "443:8443"
-      - "8080:8082"
-    volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./conf.d:/etc/nginx/conf.d:ro
-      - ./html:/usr/share/nginx/html:ro
-      - ./dashboard:/opt/nginx/dashboard:ro
-      - ./logs:/var/log/nginx
-      - ./certs:/etc/nginx/certs:ro
-      - /etc/letsencrypt:/etc/letsencrypt:ro  # Optional LE mount
-    networks:
-      nginx-network:
-        ipv4_address: 172.20.0.2
-    security_opt:
-      - no-new-privileges:true
-    read_only: true
-    tmpfs:
-      - /tmp
-      - /var/cache/nginx
-      - /var/run
-    ulimits:
-      nproc: 65535
-      nofile:
-        soft: 20000
-        hard: 40000
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: '0.5'
-        reservations:
-          cpus: '0.1'
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-    logging:
-      driver: json-file
-      options:
-        max-size: 10m
-        max-file: 3
-
-networks:
-  nginx-network:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.20.0.0/16
-          ip_range: 172.20.128.0/17
-          gateway: 172.20.0.1
-EOF
+    write_nginx_container_compose /opt/nginx/docker-compose.yml
 
 
 

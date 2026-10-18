@@ -2,9 +2,10 @@
 
 ## Version 0.75.9_modular | 2026-10-18
 
-- Limited dynamic allocation on the containerized Nginx Docker network to `172.20.128.0/17` (gateway `172.20.0.1`) so addresses `172.20.0.2` through `172.20.127.254` stay reserved for static pins, including Nginx at `172.20.0.2`.
-- Existing networks must be recreated in a maintenance window before the new pool applies; Docker cannot change IPAM on a live network.
-- Added an optional `container:port` reverse-proxy mode for a new domain route. Container Nginx resolves the upstream through Docker DNS on each request; host Nginx keeps a static `proxy_pass`. Existing route files are still left unchanged.
+- Limited dynamic allocation on a newly created containerized Nginx Docker network to `172.20.128.0/17` (gateway `172.20.0.1`) so addresses `172.20.0.2` through `172.20.127.254` stay reserved for static pins, including Nginx at `172.20.0.2`.
+- On rerun, if `nginx_nginx-network` already exists without that `ip_range`, the installer warns and writes the previous subnet-only IPAM block. Compose is not asked to recreate the network. Applying the range remains a manual step in a planned maintenance window.
+- Added an optional reverse-proxy mode when a domain route is first created. Interactive runs prompt for an upstream; Enter still writes the static-root stub. Container Nginx resolves `container:port` through Docker DNS. Container names must be one DNS label, so underscores and dots (including legacy `foo_bar_1`) are rejected. The generated block does not set WebSocket `Upgrade` or `Connection` headers.
+- Host Nginx accepts only `127.0.0.1:port` or `localhost:port` and rejects container names. Site updates run `nginx -t` before reload. A failed test removes a route file created in that run, restores the previous server config, and exits non-zero. An existing route file is preserved, and a requested upstream that is not applied produces a warning.
 
 ## Version 0.75.8_modular | 2026-09-06
 

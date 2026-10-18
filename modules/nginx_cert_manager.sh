@@ -72,16 +72,48 @@ escape_nginx_config() {
     echo "$input" | sed 's/[\/&\\]/\\&/g'
 }
 
+# True when $1 is an integer from 1 to 65535 with no leading zero.
+nginx_route_port_valid() {
+    local port="$1"
+    [[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] || return 1
+    (( port >= 1 && port <= 65535 ))
+}
+
+# Install a new route file without clobbering one that appears during the write.
+# Stdin is the file body. mv -n keeps an existing route if the check races.
+install_new_nginx_route_file() {
+    local route_file="$1"
+    local dir tmp
+    dir=$(dirname "$route_file")
+    tmp=$(mktemp "$dir/.route.XXXXXX") || return 1
+    if ! cat > "$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    chmod 644 "$tmp" || { rm -f "$tmp"; return 1; }
+    if mv -n "$tmp" "$route_file"; then
+        print_success "Created persistent domain route: $route_file"
+        return 0
+    fi
+    rm -f "$tmp"
+    if [[ -f "$route_file" ]]; then
+        print_info "Preserving existing domain route: $route_file"
+        return 0
+    fi
+    print_error "Failed to create domain route: $route_file"
+    return 1
+}
+
 # Create the application-routing portion of a domain config once. Certificate
 # operations may safely regenerate the surrounding TLS server block without
 # replacing an operator's static-site or reverse-proxy configuration.
 #
-# Optional fourth argument: a reverse-proxy upstream in container:port form.
-# An empty value on an interactive terminal prompts for one; Enter keeps the
-# static-root stub. Optional fifth argument: docker or system. When omitted,
-# docker is used unless system Nginx is active (the same systemctl check the
-# certificate flows use). Container Nginx resolves the upstream through Docker
-# DNS. Host Nginx has no Docker resolver and uses a static proxy_pass.
+# Optional fourth argument: reverse-proxy upstream. Empty input prompts unless
+# NON_INTERACTIVE=true; Enter keeps the static-root stub. Optional fifth
+# argument: docker or system. When omitted, system is used when system Nginx
+# is active (the same systemctl check the certificate flows use).
+# Container Nginx takes container:port, one DNS label, and resolves it through
+# Docker DNS. Host Nginx accepts only 127.0.0.1:port or localhost:port.
 ensure_nginx_domain_route() {
     local domain="$1"
     local route_dir="$2"
@@ -89,11 +121,13 @@ ensure_nginx_domain_route() {
     local upstream="${4-}"
     local nginx_type="${5-}"
     local route_file="$route_dir/$domain.inc"
-    local container="" port=""
+    local upstream_host="" port="" prompt_text=""
 
     validate_domain "$domain" || return 1
     mkdir -p "$route_dir"
     chmod 755 "$route_dir"
+    upstream="${upstream#"${upstream%%[![:space:]]*}"}"
+    upstream="${upstream%"${upstream##*[![:space:]]}"}"
 
     if [[ -e "$route_file" && ! -f "$route_file" ]]; then
         print_error "Domain route path is not a regular file: $route_file"
@@ -102,50 +136,102 @@ ensure_nginx_domain_route() {
 
     if [[ -f "$route_file" ]]; then
         print_info "Preserving existing domain route: $route_file"
+        if [[ -n "$upstream" ]]; then
+            print_warning "Requested upstream '$upstream' was not applied because $route_file already exists."
+        fi
         return 0
     fi
 
-    if [[ -z "$upstream" && "${NON_INTERACTIVE:-false}" != "true" && -t 0 ]]; then
-        if ! read -rp "$(printf '%s' "${CYAN}Reverse proxy upstream (container:port), or Enter for a static site: ${NC}")" upstream; then
+    if [[ -z "$nginx_type" ]]; then
+        if systemctl is-active --quiet nginx 2>/dev/null; then
+            nginx_type="system"
+        else
+            nginx_type="docker"
+        fi
+    fi
+    case "$nginx_type" in
+        docker|system) ;;
+        *)
+            print_error "Unknown Nginx type '$nginx_type'. Use docker or system."
+            return 1
+            ;;
+    esac
+
+    if [[ -z "$upstream" && "${NON_INTERACTIVE:-false}" != "true" ]]; then
+        if [[ "$nginx_type" == "system" ]]; then
+            prompt_text="Reverse proxy upstream (127.0.0.1:port or localhost:port), or Enter for a static site: "
+        else
+            prompt_text="Reverse proxy upstream (container:port), or Enter for a static site: "
+        fi
+        if ! read -rp "$(printf '%s' "${CYAN}${prompt_text}${NC}")" upstream; then
             print_info "No reverse proxy upstream entered. Creating a static site route."
             upstream=""
         fi
+        upstream="${upstream#"${upstream%%[![:space:]]*}"}"
+        upstream="${upstream%"${upstream##*[![:space:]]}"}"
     fi
-    upstream="${upstream#"${upstream%%[![:space:]]*}"}"
-    upstream="${upstream%"${upstream##*[![:space:]]}"}"
 
-    if [[ -n "$upstream" ]]; then
-        if [[ "$upstream" != *:* || "$upstream" == *:*:* ]]; then
+    if [[ -z "$upstream" ]]; then
+        install_new_nginx_route_file "$route_file" << EOF
+# Application routing for $domain.
+# This file is created once and is not overwritten by certificate operations.
+location / {
+    root $root_dir;
+    try_files \$uri \$uri/ =404;
+}
+EOF
+        return $?
+    fi
+
+    if [[ "$upstream" != *:* || "$upstream" == *:*:* ]]; then
+        if [[ "$nginx_type" == "system" ]]; then
+            print_error "Invalid host Nginx upstream '$upstream'. Use 127.0.0.1:port or localhost:port."
+        else
             print_error "Invalid reverse proxy upstream '$upstream'. Expected container:port."
-            return 1
         fi
-        container="${upstream%%:*}"
-        port="${upstream#*:}"
-        if [[ ! "$container" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]]; then
-            print_error "Invalid container name '$container'. Use a DNS label: letters, digits, and hyphens, 1-63 characters, and do not start or end with a hyphen."
-            return 1
-        fi
-        if [[ ! "$port" =~ ^[1-9][0-9]{0,4}$ ]] || (( port < 1 || port > 65535 )); then
-            print_error "Invalid upstream port '$port'. Use an integer from 1 to 65535."
-            return 1
-        fi
+        return 1
+    fi
+    upstream_host="${upstream%%:*}"
+    port="${upstream#*:}"
+    if ! nginx_route_port_valid "$port"; then
+        print_error "Invalid upstream port '$port'. Use an integer from 1 to 65535."
+        return 1
+    fi
 
-        if [[ -z "$nginx_type" ]]; then
-            if systemctl is-active --quiet nginx 2>/dev/null; then
-                nginx_type="system"
-            else
-                nginx_type="docker"
-            fi
+    if [[ "$nginx_type" == "system" ]]; then
+        if [[ "$upstream_host" != "127.0.0.1" && "$upstream_host" != "localhost" ]]; then
+            print_error "Host Nginx cannot proxy to '$upstream_host'. Use 127.0.0.1 or localhost. Container names are not accepted."
+            return 1
         fi
+        install_new_nginx_route_file "$route_file" << EOF
+# Application routing for $domain.
+# This file is created once and is not overwritten by certificate operations.
+# Host Nginx proxies only to 127.0.0.1 or localhost.
+location / {
+    proxy_pass http://${upstream_host}:${port};
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Forwarded-Host \$host;
+    proxy_set_header CF-IPCountry \$http_cf_ipcountry;
+}
+EOF
+        return $?
+    fi
 
-        case "$nginx_type" in
-            docker)
-                cat > "$route_file" << EOF
+    if [[ ! "$upstream_host" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]]; then
+        print_error "Invalid container name '$upstream_host'. Use one DNS label: letters, digits, and hyphens, 1-63 characters, not starting or ending with a hyphen. Underscores and dots are rejected."
+        return 1
+    fi
+    install_new_nginx_route_file "$route_file" << EOF
 # Application routing for $domain.
 # This file is created once and is not overwritten by certificate operations.
 location / {
     resolver 127.0.0.11 valid=10s ipv6=off;
-    set \$upstream_app http://${container}:${port};
+    set \$upstream_app http://${upstream_host}:${port};
     proxy_pass \$upstream_app;
     proxy_http_version 1.1;
     proxy_buffering off;
@@ -157,42 +243,72 @@ location / {
     proxy_set_header CF-IPCountry \$http_cf_ipcountry;
 }
 EOF
-                ;;
-            system)
-                cat > "$route_file" << EOF
-# Application routing for $domain.
-# This file is created once and is not overwritten by certificate operations.
-# Host Nginx does not use Docker DNS, so the upstream is resolved when Nginx starts.
-location / {
-    proxy_pass http://${container}:${port};
-    proxy_http_version 1.1;
-    proxy_buffering off;
-    proxy_set_header Host \$host;
-    proxy_set_header X-Real-IP \$remote_addr;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto \$scheme;
-    proxy_set_header X-Forwarded-Host \$host;
-    proxy_set_header CF-IPCountry \$http_cf_ipcountry;
 }
-EOF
-                ;;
-            *)
-                print_error "Unknown Nginx type '$nginx_type'. Use docker or system."
-                return 1
-                ;;
-        esac
-    else
-        cat > "$route_file" << EOF
-# Application routing for $domain.
-# This file is created once and is not overwritten by certificate operations.
-location / {
-    root $root_dir;
-    try_files \$uri \$uri/ =404;
-}
-EOF
+
+# Run nginx -t for the active install. System Nginx uses the host binary.
+nginx_config_test_ok() {
+    local nginx_type="$1"
+    if [[ "$nginx_type" == "system" ]]; then
+        nginx -t
+        return $?
     fi
-    chmod 644 "$route_file"
-    print_success "Created persistent domain route: $route_file"
+    docker exec nginx nginx -t -c /etc/nginx/nginx.conf
+}
+
+# Drop only the route file created by this run and put the server config back.
+# An .inc that already existed is left in place.
+rollback_nginx_config_after_failed_test() {
+    local config_file="$1"
+    local route_file="$2"
+    local route_created="$3"
+    local prior_backup="${4:-}"
+    local enabled_link="${5:-}"
+
+    if [[ "$route_created" == "true" && -n "$route_file" && -f "$route_file" ]]; then
+        rm -f "$route_file"
+        print_info "Removed domain route created by this run: $route_file"
+    fi
+    if [[ -n "$prior_backup" && -f "$prior_backup" ]]; then
+        cp "$prior_backup" "$config_file"
+        print_info "Restored previous Nginx config: $config_file"
+    else
+        rm -f "$config_file"
+        if [[ -n "$enabled_link" ]]; then
+            rm -f "$enabled_link"
+        fi
+        print_info "Removed Nginx config created by this run: $config_file"
+    fi
+}
+
+# Reload only after nginx -t succeeds. A failed test rolls the files back.
+apply_nginx_config_after_test() {
+    local nginx_type="$1"
+    local config_file="$2"
+    local route_file="$3"
+    local route_created="$4"
+    local prior_backup="${5:-}"
+    local enabled_link="${6:-}"
+
+    print_info "Testing Nginx configuration..."
+    if nginx_config_test_ok "$nginx_type"; then
+        local reload_status=0
+        print_success "Config test passed"
+        if [[ "$nginx_type" == "system" ]]; then
+            if systemctl is-active --quiet nginx 2>/dev/null; then
+                systemctl reload nginx
+            else
+                systemctl start nginx
+            fi
+        else
+            (cd /opt/nginx && run_docker_compose up -d nginx)
+        fi
+        reload_status=$?
+        return "$reload_status"
+    fi
+
+    print_error "Configuration test failed. Restoring the previous Nginx config."
+    rollback_nginx_config_after_failed_test "$config_file" "$route_file" "$route_created" "$prior_backup" "$enabled_link"
+    return 1
 }
 
 # ============================================================================
@@ -1082,7 +1198,12 @@ update_nginx_https_config() {
         chmod 600 "/opt/nginx/certs/$DOMAIN.key"
     fi
 
+    local route_file="$ROUTE_DIR/$DOMAIN.inc"
+    local route_existed=false
+    [[ -f "$route_file" ]] && route_existed=true
     ensure_nginx_domain_route "$DOMAIN" "$ROUTE_DIR" "$ROOT_DIR" "" "$NGINX_TYPE" || return 1
+    local route_created=false
+    [[ "$route_existed" == false && -f "$route_file" ]] && route_created=true
 
     # Legacy Cleanup: Remove or backup the old non-domain-specific config
     if [[ -f "$CONFIG_DIR/https.conf" ]]; then
@@ -1101,6 +1222,11 @@ update_nginx_https_config() {
 
     # Generate config file
     local CONFIG_FILE="$CONFIG_DIR/$DOMAIN.conf"
+    local prior_backup=""
+    if [[ -f "$CONFIG_FILE" ]]; then
+        prior_backup=$(mktemp)
+        cp "$CONFIG_FILE" "$prior_backup"
+    fi
     cat > "$CONFIG_FILE" << EOF
 # HTTPS configuration for $DOMAIN
 server {
@@ -1176,15 +1302,15 @@ server {
 EOF
 
     # Enable config based on type
+    local enabled_link=""
     if [[ "$NGINX_TYPE" == "system" ]]; then
+        enabled_link="/etc/nginx/sites-enabled/$DOMAIN.conf"
         # System nginx: sites-available -> sites-enabled
-        ln -sf "$CONFIG_FILE" "/etc/nginx/sites-enabled/$DOMAIN.conf" 2>/dev/null || true
+        ln -sf "$CONFIG_FILE" "$enabled_link" 2>/dev/null || true
         chown root:root "$CONFIG_FILE"
         chmod 644 "$CONFIG_FILE"
         print_success "HTTPS configuration created for $DOMAIN."
         print_success "System nginx HTTPS config: $CONFIG_FILE -> sites-enabled"
-        #print_info "Please reload Nginx to apply changes:"
-        #print_info "  sudo systemctl reload nginx"
     else
         # Docker: just chown for UID 101
         chown 101:101 "$CONFIG_FILE"
@@ -1192,23 +1318,11 @@ EOF
         print_success "Docker nginx HTTPS config: $CONFIG_FILE"
     fi
 
-    # Reload
-    if [[ "$NGINX_TYPE" == "system" ]]; then
-        if systemctl is-active --quiet nginx; then
-            systemctl reload nginx
-            print_info "System nginx reloaded."
-        else
-            systemctl start nginx
-            print_info "System nginx started."
-        fi
-    elif docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'nginx'; then
-        print_info "Rerunning nginx container to apply configuration..."
-        # We use 'up -d' because 'exec reload' fails if the container is crashed
-        cd /opt/nginx && run_docker_compose up -d nginx
-        print_info "Docker nginx container updated/restarted."
-    else
-        print_info "Nginx not running. Start it to apply config."
+    if ! apply_nginx_config_after_test "$NGINX_TYPE" "$CONFIG_FILE" "$route_file" "$route_created" "$prior_backup" "$enabled_link"; then
+        rm -f "$prior_backup"
+        return 1
     fi
+    rm -f "$prior_backup"
 
     log "HTTPS configuration updated for $DOMAIN ($NGINX_TYPE)"
 }
@@ -1291,7 +1405,6 @@ regenerate_https_config() {
     local INT_HTTP_PORT=8080 INT_HTTPS_PORT=8443
     local EXT_HTTP_PORT=80   EXT_HTTPS_PORT=443
     local ROOT_DIR="/usr/share/nginx/html" CONFIG_DIR="/opt/nginx/conf.d"
-    local TEST_CMD="docker exec nginx nginx -t -c /etc/nginx/nginx.conf" RELOAD_CMD="reload_nginx_service"
     local ROUTE_DIR="$CONFIG_DIR/routes"
     local ROUTE_INCLUDE_PATH="/etc/nginx/conf.d/routes/$DOMAIN.inc"
     local CERT_PATH_IN_CONTAINER
@@ -1304,23 +1417,28 @@ regenerate_https_config() {
         INT_HTTP_PORT=80 INT_HTTPS_PORT=443
         EXT_HTTP_PORT=80 EXT_HTTPS_PORT=443
         ROOT_DIR="/var/www/html" CONFIG_DIR="/etc/nginx/sites-available"
-        TEST_CMD="nginx -t" RELOAD_CMD="systemctl reload nginx"
         CERT_PATH_IN_CONTAINER="$ACTUAL_CERT"
         KEY_PATH_IN_CONTAINER="$ACTUAL_KEY"
         ROUTE_DIR="/etc/nginx/snippets/du-setup-routes"
         ROUTE_INCLUDE_PATH="$ROUTE_DIR/$DOMAIN.inc"
     fi
 
+    local route_file="$ROUTE_DIR/$DOMAIN.inc"
+    local route_existed=false
+    [[ -f "$route_file" ]] && route_existed=true
     ensure_nginx_domain_route "$DOMAIN" "$ROUTE_DIR" "$ROOT_DIR" "" "$NGINX_TYPE" || return 1
+    local route_created=false
+    [[ "$route_existed" == false && -f "$route_file" ]] && route_created=true
 
     # 4. Backup existing
     local CONFIG_FILE="$CONFIG_DIR/$DOMAIN.conf"
+    local prior_backup=""
     if [[ -f "$CONFIG_FILE" ]]; then
-        local ts backup_file
+        local ts
         ts=$(date +%Y%m%d_%H%M%S)
-        backup_file="$CONFIG_FILE.backup.$ts"
-        cp "$CONFIG_FILE" "$backup_file"
-        print_info "Backup .conf file created: $(basename "$backup_file")"
+        prior_backup="$CONFIG_FILE.backup.$ts"
+        cp "$CONFIG_FILE" "$prior_backup"
+        print_info "Backup .conf file created: $(basename "$prior_backup")"
     fi
 
     # 5. Apply permissions
@@ -1441,7 +1559,11 @@ EOF
     chmod 644 "$CONFIG_FILE"
 
     # System nginx: enable site
-    [[ "$NGINX_TYPE" == "system" ]] && ln -sf "$CONFIG_FILE" "/etc/nginx/sites-enabled/$DOMAIN.conf"
+    local enabled_link=""
+    if [[ "$NGINX_TYPE" == "system" ]]; then
+        enabled_link="/etc/nginx/sites-enabled/$DOMAIN.conf"
+        ln -sf "$CONFIG_FILE" "$enabled_link"
+    fi
 
     # 6. Legacy Cleanup
     if [[ -f "$CONFIG_DIR/https.conf" ]]; then
@@ -1451,57 +1573,28 @@ EOF
     fi
 
     # 7. Test and Reload
-    print_info "Testing configuration..."
-    if eval "$TEST_CMD"; then
-        print_success "Config test passed"
-        
-        if [[ "$NGINX_TYPE" == "system" ]]; then
-            systemctl reload nginx || systemctl start nginx
-        else
-            # For Docker, 'up -d' is safer than 'reload' if it was previously crashed
-            cd /opt/nginx && run_docker_compose up -d nginx
-        fi
-        print_success "Nginx updated and reloaded"
-
-        # Verify health check
-        print_info "Verifying health check (Attempting connection)..."
-        local hc_passed=false
-        # 3 attempts with 2s delay
-        for i in 1 2 3; do
-            if curl -f -k -s -H "Host: $DOMAIN" "http://127.0.0.1:$EXT_HTTP_PORT/health" >/dev/null 2>&1 || \
-               curl -f -k -s -H "Host: $DOMAIN" "https://127.0.0.1:$EXT_HTTPS_PORT/health" >/dev/null 2>&1; then
-                print_success "Health check ✓"
-                hc_passed=true
-                break
-            fi
-            [[ $i -lt 3 ]] && sleep 2
-        done
-
-        if [[ "$hc_passed" == "false" ]]; then
-            print_warning "Health check failed after 3 attempts."
-            print_info "Check if $DOMAIN resolves to 127.0.0.1 or check Nginx logs."
-        fi
-    else
-        print_error "Configuration test failed. Restoring previous config..."
-        # Find the most recent backup
-        local latest_backup
-        # shellcheck disable=SC2012
-        latest_backup=$(ls -t "$CONFIG_FILE.backup."* 2>/dev/null | head -1)
-
-        if [[ -n "$latest_backup" ]]; then
-            cp "$latest_backup" "$CONFIG_FILE"
-            print_info "Restored from backup: $latest_backup"
-            # Re-test and reload the restored config (optional but nice)
-            if eval "$TEST_CMD"; then
-                eval "$RELOAD_CMD"
-                print_success "Nginx reloaded with restored configuration."
-            else
-                print_warning "Restored configuration still fails nginx -t. Check logs."
-            fi
-        else
-            print_warning "No backup found to restore"
-        fi
+    if ! apply_nginx_config_after_test "$NGINX_TYPE" "$CONFIG_FILE" "$route_file" "$route_created" "$prior_backup" "$enabled_link"; then
         return 1
+    fi
+    print_success "Nginx updated and reloaded"
+
+    # Verify health check
+    print_info "Verifying health check (Attempting connection)..."
+    local hc_passed=false
+    # 3 attempts with 2s delay
+    for i in 1 2 3; do
+        if curl -f -k -s -H "Host: $DOMAIN" "http://127.0.0.1:$EXT_HTTP_PORT/health" >/dev/null 2>&1 || \
+           curl -f -k -s -H "Host: $DOMAIN" "https://127.0.0.1:$EXT_HTTPS_PORT/health" >/dev/null 2>&1; then
+            print_success "Health check ✓"
+            hc_passed=true
+            break
+        fi
+        [[ $i -lt 3 ]] && sleep 2
+    done
+
+    if [[ "$hc_passed" == "false" ]]; then
+        print_warning "Health check failed after 3 attempts."
+        print_info "Check if $DOMAIN resolves to 127.0.0.1 or check Nginx logs."
     fi
 
         log "HTTPS config regenerated for $DOMAIN ($NGINX_TYPE)"

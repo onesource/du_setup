@@ -230,3 +230,12 @@ jobs:
           else
             echo "::warning::Only found $sourced_count source statements (expected >= 10)"
           fi
+
+  test-nginx-domain-routes:
+    name: Test Nginx domain routes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test persistent Nginx domain routes
+        run: bash tests/test_nginx_domain_routes.sh

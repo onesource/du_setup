@@ -64,16 +64,18 @@ The modular version deliberately owns generated snippets and state; direct edits
   * **Containerized Nginx** (recommended): Docker-based deployment with security-hardened configuration, SSL/TLS support, and resource limits
   * **Host-based Nginx**: Direct installation on the system for traditional deployments
   * Includes security headers, rate limiting, access controls, and performance optimizations
-  * On the generated `nginx-network` (`172.20.0.0/16`, gateway `172.20.0.1`), `172.20.0.2` through `172.20.127.254` is reserved for static pins, with `172.20.0.2` for Nginx. Every new site either pins a static IPv4 in that low range or takes a dynamic address from `172.20.128.0/17`.
-  * Existing networks must be recreated in a maintenance window before `ip_range` takes effect. Docker cannot change IPAM on a live network, so rewriting the compose file does not apply it automatically.
+  * On a new `nginx-network` (`172.20.0.0/16`, gateway `172.20.0.1`), `172.20.0.2` through `172.20.127.254` is reserved for static pins, with `172.20.0.2` for Nginx. Every new site either pins a static IPv4 in that low range or takes a dynamic address from `172.20.128.0/17`.
+  * If `nginx_nginx-network` already exists without `ip_range` `172.20.128.0/17`, the installer warns, writes the previous subnet-only IPAM block, and skips changing the network. Compose is not asked to recreate it, because that would stop Nginx. Recreating the network so the range takes effect is a manual step in a planned maintenance window. Docker cannot change IPAM on a live network, and this repository does not include a script that recreates it.
 * **Nginx Certificate Management**: Automated SSL/TLS certificate handling:
   * Self-signed certificate generation for testing
   * Let's Encrypt integration with automatic renewal
   * Certificate import functionality for existing certificates
   * Certificate expiration monitoring and alerts
   * Persistent per-domain route snippets keep static-site or reverse-proxy routing intact when certificate configuration is regenerated
-  * A new route is a static-site stub unless you pass or enter a reverse-proxy upstream as `container:port`. Container Nginx resolves that upstream through Docker DNS (`resolver 127.0.0.11`) and a variable `proxy_pass`, so Nginx can start while the upstream container is down and picks up a new container address on the next request. Host Nginx uses a static `proxy_pass` because Docker's resolver is only available inside containers.
-  * Container names must be DNS labels and ports must be integers from 1 to 65535. An existing route file is never overwritten.
+  * A new route is a static-site stub unless you pass or enter a reverse-proxy upstream. Creating a route prompts for one unless `--non-interactive` is set; Enter keeps the static-root stub. Container Nginx takes `container:port`, resolves it through Docker DNS (`resolver 127.0.0.11`), and uses a variable `proxy_pass`, so Nginx can start while the upstream container is down and picks up a new container address on the next request. The container name must be one DNS label (letters, digits, and hyphens). Underscores and dots are rejected, including legacy Docker names such as `foo_bar_1`.
+  * Host Nginx accepts only `127.0.0.1:port` or `localhost:port`. A container name is rejected because host Nginx cannot resolve Docker DNS. Ports are integers from 1 to 65535.
+  * The generated proxy block matches the live header set and does not set `Upgrade` or `Connection`, so it does not proxy WebSockets.
+  * An existing route file is never overwritten. If an upstream is requested anyway, the run warns that it was not applied. `nginx -t` runs before every reload. When the test fails, a route file created in that run is removed and the server config is restored to its previous state. A route file that already existed is left in place.
   * Container routes are stored in `/opt/nginx/conf.d/routes/<domain>.inc`; host Nginx routes are stored in `/etc/nginx/snippets/du-setup-routes/<domain>.inc`
   * After the initial installation, run `sudo -E ./du_setup_modular.sh --nginx-security` to manage additional sites and certificates without repeating the full server setup
 * **Nginx Security Monitoring**: Comprehensive monitoring and alerting:
