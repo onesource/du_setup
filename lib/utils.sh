@@ -45,7 +45,7 @@ print_header() {
     printf '%s\n' "${CYAN}╔═════════════════════════════════════════════════════════════════╗${NC}"
     printf '%s\n' "${CYAN}║                                                                 ║${NC}"
     printf '%s\n' "${CYAN}║       DEBIAN/UBUNTU SERVER SETUP AND HARDENING SCRIPT           ║${NC}"
-    printf '%s\n' "${CYAN}║                 v0.75.8_modular | 2026-09-06                    ║${NC}"
+    printf '%s\n' "${CYAN}║                 v0.75.9_modular | 2026-10-18                    ║${NC}"
     printf '%s\n' "${CYAN}║                                                                 ║${NC}"
     printf '%s\n' "${CYAN}╚═════════════════════════════════════════════════════════════════╝${NC}"
     printf '\n'
@@ -56,7 +56,7 @@ print_header() {
             printf '╔═════════════════════════════════════════════════════════════════╗\n'
             printf '║                                                                 ║\n'
             printf '║       DEBIAN/UBUNTU SERVER SETUP AND HARDENING SCRIPT           ║\n'
-            printf '║                 v0.75.8_modular | 2026-09-06                    ║\n'
+            printf '║                 v0.75.9_modular | 2026-10-18                    ║\n'
             printf '║                                                                 ║\n'
             printf '╚═════════════════════════════════════════════════════════════════╝\n'
             printf '\n'

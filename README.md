@@ -7,9 +7,9 @@
 
 -----
 
-**Version:** v0.75.8_modular
+**Version:** v0.75.9_modular
 
-**Last Updated:** 2026-09-06
+**Last Updated:** 2026-10-18
 
 **Compatible With:**
 
@@ -64,12 +64,18 @@ The modular version deliberately owns generated snippets and state; direct edits
   * **Containerized Nginx** (recommended): Docker-based deployment with security-hardened configuration, SSL/TLS support, and resource limits
   * **Host-based Nginx**: Direct installation on the system for traditional deployments
   * Includes security headers, rate limiting, access controls, and performance optimizations
+  * On a new `nginx-network` (`172.20.0.0/16`, gateway `172.20.0.1`), `172.20.0.2` through `172.20.127.254` is reserved for static pins, with `172.20.0.2` for Nginx. Every new site either pins a static IPv4 in that low range or takes a dynamic address from `172.20.128.0/17`.
+  * If `nginx_nginx-network` already exists without `ip_range` `172.20.128.0/17`, the installer warns, writes the previous subnet-only IPAM block, and skips changing the network. The installer never recreates this network. Applying the range is a planned maintenance-window step and needs George's approval. Do not use `docker network rm` or `docker network create`. The steps are in [Recreating nginx_nginx-network](#recreating-nginx_nginx-network).
 * **Nginx Certificate Management**: Automated SSL/TLS certificate handling:
   * Self-signed certificate generation for testing
   * Let's Encrypt integration with automatic renewal
   * Certificate import functionality for existing certificates
   * Certificate expiration monitoring and alerts
   * Persistent per-domain route snippets keep static-site or reverse-proxy routing intact when certificate configuration is regenerated
+  * A new route is a static-site stub unless you pass or enter a reverse-proxy upstream. Creating a route prompts for one only when stdin is a terminal and `--non-interactive` is not set; Enter keeps the static-root stub. Container Nginx takes `container:port`, resolves it through Docker DNS (`resolver 127.0.0.11`), and uses a variable `proxy_pass`, so Nginx can start while the upstream container is down and picks up a new container address on the next request. The container name must be one DNS label (letters, digits, and hyphens). Underscores and dots are rejected, including legacy Docker names such as `foo_bar_1`.
+  * Host Nginx accepts only `127.0.0.1:port` or `localhost:port`. A container name is rejected because host Nginx cannot resolve Docker DNS. Ports are integers from 1 to 65535.
+  * The generated proxy block matches the live header set and does not set `Upgrade` or `Connection`, so it does not proxy WebSockets.
+  * An existing route file is never overwritten. If an upstream is requested anyway, the run warns that it was not applied. `nginx -t` runs before every reload. When the test fails, a route file created in that run is removed and the server config is restored to its previous state. A route file that already existed is left in place.
   * Container routes are stored in `/opt/nginx/conf.d/routes/<domain>.inc`; host Nginx routes are stored in `/etc/nginx/snippets/du-setup-routes/<domain>.inc`
   * After the initial installation, run `sudo -E ./du_setup_modular.sh --nginx-security` to manage additional sites and certificates without repeating the full server setup
 * **Nginx Security Monitoring**: Comprehensive monitoring and alerting:
@@ -93,6 +99,42 @@ The modular version deliberately owns generated snippets and state; direct edits
   * Advanced security tools (AIDE)
 * **Comprehensive Logging**: Stores du_setup-owned logs and reports under `/var/log/du-setup/`; legacy files are migrated there without overwriting existing logs.
 * **Automation Safety**: `--quiet` never grants consent; `--non-interactive` preserves valid detected state and fails closed when required input is missing.
+
+-----
+
+## Recreating nginx_nginx-network
+
+Docker cannot change IPAM on a live network. On a new `nginx-network`, dynamic addresses come from `172.20.128.0/17`, and `172.20.0.2` through `172.20.127.254` stays reserved for static pins, with `172.20.0.2` for Nginx. If `nginx_nginx-network` already exists without `ip_range` `172.20.128.0/17`, the installer warns and leaves the subnet-only block in `/opt/nginx/docker-compose.yml`. The installer never runs this procedure.
+
+Applying the range is a planned maintenance-window step and needs George's approval. Do not use `docker network rm` or `docker network create`. A network created outside Compose can make the next `docker compose up` fail on a label mismatch.
+
+1. Detach every other stack from `nginx_nginx-network` with `down` or `rm`, not `stop`. A stopped container keeps the old network ID, and a later `docker start` fails after the network is recreated. `docker network inspect nginx_nginx-network` lists attached containers. Remove anything else it lists the same way. Continue only when `Containers` is empty.
+   * SweetSaving: `systemctl stop sweetsaving-compose`. That does nothing if the unit is not active. In that case, or if inspect still lists its containers, run this from `/opt/sweetsaving`:
+
+     ```bash
+     docker compose --env-file .env.local -f docker-compose.yml -f compose.production.yml down
+     ```
+
+     A plain `docker compose up -d` drops the `.3` and `.5` pins and publishes ports 8180, 4100, and 4101 on all interfaces.
+   * AlphaEngine ui is profile-gated. From `/opt/AlphaEngine`, remove it with `docker compose --profile ui rm -s -f ui` so a running ui is stopped and removed without a prompt. Do not use `docker compose --profile ui stop ui`, and do not run `docker compose down` without `--profile ui`. Never start the worker or refresh profiles in this procedure.
+
+2. Recreate the Nginx network only after that inspect lists no attached containers. On a legacy host the compose file still has the subnet-only IPAM block, so `down` then `up -d` recreates `nginx_nginx-network` without `ip_range`.
+   * Before `up -d`, edit `/opt/nginx/docker-compose.yml` so the network IPAM is `subnet: 172.20.0.0/16`, `ip_range: 172.20.128.0/17`, and `gateway: 172.20.0.1`.
+   * From `/opt/nginx`, check it with `docker compose config`.
+   * Run `docker compose down`.
+   * Confirm `docker network inspect nginx_nginx-network` shows no attached containers, or that the network is gone. Otherwise `down`/`up` just recreates the same network. Do not run `up -d` until that is true.
+   * Run `docker compose up -d`.
+
+3. Bring the stacks back with the commands that pin their addresses.
+   * SweetSaving: `systemctl start sweetsaving-compose`, or, from `/opt/sweetsaving`, the same flags as the `down`:
+
+     ```bash
+     docker compose --env-file .env.local -f docker-compose.yml -f compose.production.yml up -d --remove-orphans
+     ```
+
+   * AlphaEngine, from `/opt/AlphaEngine`: `make docker-up`, or `docker compose --profile ui up -d ui`. Never start the worker or refresh profiles.
+
+4. Verify with `docker network inspect nginx_nginx-network`. `IPAM.Config` must show `IPRange` `172.20.128.0/17`. Nginx must be `172.20.0.2`, the sweetsaving frontend `172.20.0.3`, AlphaEngine ui `172.20.0.4`, and the sweetsaving backend `172.20.0.5`. Then confirm `https://www.sweetsaving.com` and `https://www.myalphaengine.com/healthz` both return healthy.
 
 -----
 
