@@ -80,10 +80,12 @@ nginx_route_port_valid() {
 }
 
 # Install a new route file without clobbering one that appears during the write.
-# Stdin is the file body. mv -n keeps an existing route if the check races.
+# Stdin is the file body. Older coreutils can return 0 from `mv -n` without
+# moving, so success requires the temp file to be gone and the destination to
+# hold the new bytes. An existing route is left unchanged.
 install_new_nginx_route_file() {
     local route_file="$1"
-    local dir tmp
+    local dir tmp sum dest_sum
     dir=$(dirname "$route_file")
     tmp=$(mktemp "$dir/.route.XXXXXX") || return 1
     if ! cat > "$tmp"; then
@@ -91,16 +93,16 @@ install_new_nginx_route_file() {
         return 1
     fi
     chmod 644 "$tmp" || { rm -f "$tmp"; return 1; }
-    if mv -n "$tmp" "$route_file"; then
-        print_success "Created persistent domain route: $route_file"
-        return 0
+    sum=$(sha256sum "$tmp" | awk '{print $1}')
+    if mv -n "$tmp" "$route_file" && [[ ! -e "$tmp" ]]; then
+        dest_sum=$(sha256sum "$route_file" | awk '{print $1}')
+        if [[ "$dest_sum" == "$sum" ]]; then
+            print_success "Created persistent domain route: $route_file"
+            return 0
+        fi
     fi
     rm -f "$tmp"
-    if [[ -f "$route_file" ]]; then
-        print_info "Preserving existing domain route: $route_file"
-        return 0
-    fi
-    print_error "Failed to create domain route: $route_file"
+    print_error "Failed to install domain route $route_file. Any existing route file was left unchanged."
     return 1
 }
 
@@ -108,8 +110,9 @@ install_new_nginx_route_file() {
 # operations may safely regenerate the surrounding TLS server block without
 # replacing an operator's static-site or reverse-proxy configuration.
 #
-# Optional fourth argument: reverse-proxy upstream. Empty input prompts unless
-# NON_INTERACTIVE=true; Enter keeps the static-root stub. Optional fifth
+# Optional fourth argument: reverse-proxy upstream. Empty input prompts only
+# when stdin is a terminal and NON_INTERACTIVE is not true; Enter keeps the
+# static-root stub. Optional fifth
 # argument: docker or system. When omitted, system is used when system Nginx
 # is active (the same systemctl check the certificate flows use).
 # Container Nginx takes container:port, one DNS label, and resolves it through
@@ -157,7 +160,7 @@ ensure_nginx_domain_route() {
             ;;
     esac
 
-    if [[ -z "$upstream" && "${NON_INTERACTIVE:-false}" != "true" ]]; then
+    if [[ -z "$upstream" && "${NON_INTERACTIVE:-false}" != "true" && -t 0 ]]; then
         if [[ "$nginx_type" == "system" ]]; then
             prompt_text="Reverse proxy upstream (127.0.0.1:port or localhost:port), or Enter for a static site: "
         else
@@ -245,6 +248,20 @@ location / {
 EOF
 }
 
+# Docker exec and reload need a running container. Say so before a cryptic
+# daemon error, and do not call docker exec when it is stopped.
+nginx_container_is_running() {
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'nginx'
+}
+
+require_running_nginx_container() {
+    if nginx_container_is_running; then
+        return 0
+    fi
+    print_error "The Nginx container is not running, so nginx -t and reload cannot run inside it. Start it from /opt/nginx with: docker compose up -d"
+    return 1
+}
+
 # Run nginx -t for the active install. System Nginx uses the host binary.
 nginx_config_test_ok() {
     local nginx_type="$1"
@@ -252,6 +269,7 @@ nginx_config_test_ok() {
         nginx -t
         return $?
     fi
+    require_running_nginx_container || return 1
     docker exec nginx nginx -t -c /etc/nginx/nginx.conf
 }
 
@@ -1818,8 +1836,15 @@ reload_nginx_service() {
     # Check for Docker Nginx first
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'nginx'; then
         print_info "Reloading Docker Nginx configuration..."
+        if ! require_running_nginx_container; then
+            return 1
+        fi
         # We try 'exec' first, falling back to 'kill -HUP' if exec is restricted
         if ! (cd /opt/nginx && run_docker_compose exec -T nginx nginx -s reload 2>/dev/null); then
+            if ! nginx_container_is_running; then
+                print_error "The Nginx container is not running, so nginx -t and reload cannot run inside it. Start it from /opt/nginx with: docker compose up -d"
+                return 1
+            fi
             docker kill -s HUP nginx >/dev/null 2>&1 || true
         fi
         print_success "Docker Nginx reloaded."

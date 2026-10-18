@@ -142,17 +142,144 @@ grep -Fqx '    set $upstream_app http://api:443;' "$detected_docker"
 grep -Fqx '    proxy_pass $upstream_app;' "$detected_docker"
 unset -f systemctl
 
-# Prompt path: stdin is a here-string and NON_INTERACTIVE is unset for the call.
-prompt_route="$route_dir/prompt.example.inc"
-NON_INTERACTIVE=false ensure_nginx_domain_route prompt.example "$route_dir" /srv/www "" docker <<<'app-1:9090'
+# A non-terminal stdin is not a prompt, even when NON_INTERACTIVE is unset.
+# Piped upstream text must stay unread and the static stub must be written.
+gated_route="$route_dir/gated.example.inc"
+NON_INTERACTIVE=false ensure_nginx_domain_route gated.example "$route_dir" /srv/www "" docker <<<'app-1:9090'
+grep -Fqx '    root /srv/www;' "$gated_route"
+if grep -Fq 'proxy_pass' "$gated_route"; then
+    printf 'non-tty prompt consumed piped upstream\n' >&2
+    exit 1
+fi
+gated_host="$route_dir/gated-host.example.inc"
+NON_INTERACTIVE=false ensure_nginx_domain_route gated-host.example "$route_dir" /var/www/html "" system <<<'localhost:8080'
+grep -Fqx '    root /var/www/html;' "$gated_host"
+if grep -Fq 'proxy_pass' "$gated_host"; then
+    printf 'non-tty host prompt consumed piped upstream\n' >&2
+    exit 1
+fi
+
+# A real terminal does prompt, and the answer becomes the route.
+python3 - "$temp_dir" "$route_dir" "$source_file" << 'PY'
+import os
+import pty
+import select
+import subprocess
+import sys
+
+temp_dir, route_dir, source_file = sys.argv[1:4]
+script = os.path.join(temp_dir, "pty-route.sh")
+with open(script, "w", encoding="utf-8") as handle:
+    handle.write(
+        "#!/bin/bash\n"
+        "set -euo pipefail\n"
+        f"source {source_file!r}\n"
+        "NON_INTERACTIVE=false\n"
+        f"ensure_nginx_domain_route tty-prompt.example {route_dir!r} /srv/www \"\" docker\n"
+    )
+os.chmod(script, 0o755)
+master, slave = pty.openpty()
+proc = subprocess.Popen(
+    ["bash", script],
+    stdin=slave,
+    stdout=slave,
+    stderr=slave,
+    close_fds=True,
+)
+os.close(slave)
+buffer = b""
+answered = False
+deadline_reads = 0
+while proc.poll() is None and deadline_reads < 50:
+    ready, _, _ = select.select([master], [], [], 0.2)
+    deadline_reads += 1
+    if not ready:
+        continue
+    try:
+        chunk = os.read(master, 4096)
+    except OSError:
+        break
+    if not chunk:
+        break
+    buffer += chunk
+    if not answered and b"container:port" in buffer:
+        os.write(master, b"app-1:9090\n")
+        answered = True
+try:
+    proc.wait(timeout=10)
+except subprocess.TimeoutExpired:
+    proc.kill()
+    proc.wait(timeout=5)
+os.close(master)
+if proc.returncode != 0 or not answered:
+    sys.stderr.write(buffer.decode("utf-8", "replace"))
+    sys.stderr.write(f"\npty prompt failed: rc={proc.returncode} answered={answered}\n")
+    sys.exit(1)
+PY
 # shellcheck disable=SC2016
-grep -Fqx '    set $upstream_app http://app-1:9090;' "$prompt_route"
-prompt_static="$route_dir/prompt-static.example.inc"
-NON_INTERACTIVE=false ensure_nginx_domain_route prompt-static.example "$route_dir" /srv/www "" docker <<<''
-grep -Fqx '    root /srv/www;' "$prompt_static"
-prompt_host="$route_dir/prompt-host.example.inc"
-NON_INTERACTIVE=false ensure_nginx_domain_route prompt-host.example "$route_dir" /var/www/html "" system <<<'localhost:8080'
-grep -Fqx '    proxy_pass http://localhost:8080;' "$prompt_host"
+grep -Fqx '    set $upstream_app http://app-1:9090;' "$route_dir/tty-prompt.example.inc"
+
+# Older coreutils can return 0 from mv -n without moving. The temp file must
+# be removed, the command must fail, and an existing route must stay put.
+(
+    # shellcheck disable=SC2317,SC2329  # mock invoked by install_new_nginx_route_file
+    mv() {
+        if [[ "${1:-}" == -n ]]; then
+            return 0
+        fi
+        command mv "$@"
+    }
+    keep_route="$route_dir/move-keep.example.inc"
+    printf 'original-route\n' > "$keep_route"
+    move_output=""
+    if move_output=$(printf 'replacement\n' | install_new_nginx_route_file "$keep_route" 2>&1); then
+        printf 'expected a no-op mv -n to fail\n' >&2
+        exit 1
+    fi
+    grep -Fq 'left unchanged' <<< "$move_output"
+    grep -qx 'original-route' "$keep_route"
+    fresh_output=""
+    if fresh_output=$(printf 'brand-new\n' | install_new_nginx_route_file "$route_dir/move-fresh.example.inc" 2>&1); then
+        printf 'expected a no-op mv -n to fail for a new route\n' >&2
+        exit 1
+    fi
+    grep -Fq 'left unchanged' <<< "$fresh_output"
+    [[ ! -e "$route_dir/move-fresh.example.inc" ]]
+    shopt -s nullglob
+    leftovers=("$route_dir"/.route.*)
+    [[ ${#leftovers[@]} -eq 0 ]]
+)
+
+# A stopped Nginx container gets an actionable error before docker exec.
+(
+    # shellcheck disable=SC2317,SC2329
+    docker() {
+        printf '%s\n' "$*" >> "$temp_dir/docker-down.log"
+        if [[ "${1:-}" == ps ]]; then
+            return 0
+        fi
+        printf 'Error response from daemon: container is not running\n' >&2
+        return 1
+    }
+    down_conf="$temp_dir/sites/down.example.conf"
+    mkdir -p "$(dirname "$down_conf")"
+    printf 'down-config\n' > "$down_conf"
+    down_route="$temp_dir/routes/down.example.inc"
+    printf 'down-route\n' > "$down_route"
+    down_output=""
+    if down_output=$(apply_nginx_config_after_test docker "$down_conf" "$down_route" true "" 2>&1); then
+        printf 'expected a stopped container to fail nginx -t\n' >&2
+        exit 1
+    fi
+    grep -Fq 'The Nginx container is not running' <<< "$down_output"
+    grep -Fq '/opt/nginx' <<< "$down_output"
+    grep -Fq 'docker compose up -d' <<< "$down_output"
+    [[ ! -e "$down_route" ]]
+    if grep -q '^exec ' "$temp_dir/docker-down.log"; then
+        printf 'docker exec ran while the Nginx container was stopped\n' >&2
+        exit 1
+    fi
+)
 
 # nginx -t failure rolls back a route created in this run and restores the conf.
 (
@@ -278,6 +405,11 @@ grep -Fqx '    proxy_pass http://localhost:8080;' "$prompt_host"
     legacy_output=$(write_nginx_container_compose "$legacy_file")
     grep -Fq 'Skipping network changes so Compose does not recreate nginx_nginx-network' <<< "$legacy_output"
     grep -Fq 'planned maintenance window' <<< "$legacy_output"
+    grep -Fq '/opt/nginx' <<< "$legacy_output"
+    grep -Fq 'docker compose down' <<< "$legacy_output"
+    grep -Fq 'docker compose up -d' <<< "$legacy_output"
+    grep -Fq 'docker network rm' <<< "$legacy_output"
+    grep -Fq 'docker network create' <<< "$legacy_output"
     grep -Fq 'subnet: 172.20.0.0/16' "$legacy_file"
     grep -Fq 'ipv4_address: 172.20.0.2' "$legacy_file"
     if grep -Fq 'ip_range:' "$legacy_file"; then

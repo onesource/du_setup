@@ -181,7 +181,7 @@ nginx_compose_ipam_yaml() {
 }
 
 warn_legacy_nginx_network() {
-    print_warning "nginx_nginx-network already exists without ip_range 172.20.128.0/17. Skipping network changes so Compose does not recreate nginx_nginx-network and take Nginx down. Recreate nginx_nginx-network manually in a planned maintenance window to reserve 172.20.0.2-172.20.127.254 for static pins."
+    print_warning "nginx_nginx-network already exists without ip_range 172.20.128.0/17. Skipping network changes so Compose does not recreate nginx_nginx-network and take Nginx down. Recreate it in a planned maintenance window from /opt/nginx with 'docker compose down' and then 'docker compose up -d'. Do not use 'docker network rm' or 'docker network create'; a network created outside Compose can make the next 'docker compose up' fail on a label mismatch. That recreate reserves 172.20.0.2-172.20.127.254 for static pins."
 }
 
 # Write the container Compose file. An existing network without ip_range keeps
