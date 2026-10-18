@@ -1,5 +1,10 @@
 # Changelog for du_setup_modular.sh
 
+## Version 0.75.9_modular | 2026-10-18
+
+- Limited dynamic allocation on the containerized Nginx Docker network to `172.20.128.0/17` (gateway `172.20.0.1`) so addresses `172.20.0.2` through `172.20.127.254` stay reserved for static pins, including Nginx at `172.20.0.2`.
+- Existing networks must be recreated in a maintenance window before the new pool applies; Docker cannot change IPAM on a live network.
+
 ## Version 0.75.8_modular | 2026-09-06
 
 - Added `--nginx-security` maintenance mode for certificate, monitoring, and vulnerability tasks without rerunning the full installer.

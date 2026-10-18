@@ -7,9 +7,9 @@
 
 -----
 
-**Version:** v0.75.8_modular
+**Version:** v0.75.9_modular
 
-**Last Updated:** 2026-09-06
+**Last Updated:** 2026-10-18
 
 **Compatible With:**
 
@@ -64,6 +64,8 @@ The modular version deliberately owns generated snippets and state; direct edits
   * **Containerized Nginx** (recommended): Docker-based deployment with security-hardened configuration, SSL/TLS support, and resource limits
   * **Host-based Nginx**: Direct installation on the system for traditional deployments
   * Includes security headers, rate limiting, access controls, and performance optimizations
+  * On the generated `nginx-network` (`172.20.0.0/16`, gateway `172.20.0.1`), `172.20.0.2` through `172.20.127.254` is reserved for static pins, with `172.20.0.2` for Nginx. Every new site either pins a static IPv4 in that low range or takes a dynamic address from `172.20.128.0/17`.
+  * Existing networks must be recreated in a maintenance window before `ip_range` takes effect. Docker cannot change IPAM on a live network, so rewriting the compose file does not apply it automatically.
 * **Nginx Certificate Management**: Automated SSL/TLS certificate handling:
   * Self-signed certificate generation for testing
   * Let's Encrypt integration with automatic renewal

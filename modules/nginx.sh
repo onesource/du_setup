@@ -577,6 +577,8 @@ networks:
     ipam:
       config:
         - subnet: 172.20.0.0/16
+          ip_range: 172.20.128.0/17
+          gateway: 172.20.0.1
 EOF
 
 
