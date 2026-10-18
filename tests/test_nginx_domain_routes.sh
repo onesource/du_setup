@@ -407,19 +407,13 @@ grep -Fqx '    set $upstream_app http://app-1:9090;' "$route_dir/tty-prompt.exam
     grep -Fq 'planned maintenance-window' <<< "$legacy_output"
     grep -Fq "needs George's approval" <<< "$legacy_output"
     grep -Fq 'The installer never recreates this network.' <<< "$legacy_output"
-    grep -Fq '/opt/nginx' <<< "$legacy_output"
-    grep -Fq '/opt/AlphaEngine' <<< "$legacy_output"
-    grep -Fq 'sweetsaving.com' <<< "$legacy_output"
-    grep -Fq 'frontend 172.20.0.3' <<< "$legacy_output"
-    grep -Fq 'backend 172.20.0.5' <<< "$legacy_output"
-    grep -Fq 'ui 172.20.0.4' <<< "$legacy_output"
-    grep -Fq 'docker compose down' <<< "$legacy_output"
-    grep -Fq 'docker compose up -d' <<< "$legacy_output"
     grep -Fq 'docker network rm' <<< "$legacy_output"
     grep -Fq 'docker network create' <<< "$legacy_output"
-    grep -Fq 'docker network inspect nginx_nginx-network' <<< "$legacy_output"
-    grep -Fq 'IPAM.Config shows IPRange 172.20.128.0/17' <<< "$legacy_output"
-    grep -Fq 'https://www.myalphaengine.com/healthz' <<< "$legacy_output"
+    grep -Fq 'README section "Recreating nginx_nginx-network"' <<< "$legacy_output"
+    if grep -Eq '/opt/sweetsaving|make docker-up|compose.production.yml|systemctl stop sweetsaving-compose' <<< "$legacy_output"; then
+        printf 'legacy network warning repeated the recreate steps\n' >&2
+        exit 1
+    fi
     grep -Fq 'subnet: 172.20.0.0/16' "$legacy_file"
     grep -Fq 'ipv4_address: 172.20.0.2' "$legacy_file"
     if grep -Fq 'ip_range:' "$legacy_file"; then

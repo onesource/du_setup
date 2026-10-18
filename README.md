@@ -65,11 +65,7 @@ The modular version deliberately owns generated snippets and state; direct edits
   * **Host-based Nginx**: Direct installation on the system for traditional deployments
   * Includes security headers, rate limiting, access controls, and performance optimizations
   * On a new `nginx-network` (`172.20.0.0/16`, gateway `172.20.0.1`), `172.20.0.2` through `172.20.127.254` is reserved for static pins, with `172.20.0.2` for Nginx. Every new site either pins a static IPv4 in that low range or takes a dynamic address from `172.20.128.0/17`.
-  * If `nginx_nginx-network` already exists without `ip_range` `172.20.128.0/17`, the installer warns, writes the previous subnet-only IPAM block, and skips changing the network. Compose is not asked to recreate it. The installer never recreates this network. Applying the range is a planned maintenance-window step and needs George's approval. Do not use `docker network rm` or `docker network create`. A network created outside Compose can make the next `docker compose up` fail on a label mismatch. Docker cannot change IPAM on a live network. When that window is approved, use this order:
-    1. Stop every other stack attached to `nginx_nginx-network`. Stop sweetsaving.com and AlphaEngine with `docker compose down` or `docker compose stop` in each stack's own directory. `docker network inspect nginx_nginx-network` lists any other attached containers.
-    2. In `/opt/nginx`, run `docker compose down`, then `docker compose up -d`.
-    3. Bring the stacks back with the compose files that already pin their addresses. In the sweetsaving.com directory, run its normal `docker compose up -d` (frontend `172.20.0.3`, backend `172.20.0.5`). In `/opt/AlphaEngine`, run `docker compose up -d` (ui `172.20.0.4`).
-    4. Run `docker network inspect nginx_nginx-network` and confirm `IPAM.Config` shows `IPRange` `172.20.128.0/17`. Then confirm `https://www.myalphaengine.com/healthz` returns healthy once the stacks are back.
+  * If `nginx_nginx-network` already exists without `ip_range` `172.20.128.0/17`, the installer warns, writes the previous subnet-only IPAM block, and skips changing the network. The installer never recreates this network. Applying the range is a planned maintenance-window step and needs George's approval. Do not use `docker network rm` or `docker network create`. The steps are in [Recreating nginx_nginx-network](#recreating-nginx_nginx-network).
 * **Nginx Certificate Management**: Automated SSL/TLS certificate handling:
   * Self-signed certificate generation for testing
   * Let's Encrypt integration with automatic renewal
@@ -103,6 +99,42 @@ The modular version deliberately owns generated snippets and state; direct edits
   * Advanced security tools (AIDE)
 * **Comprehensive Logging**: Stores du_setup-owned logs and reports under `/var/log/du-setup/`; legacy files are migrated there without overwriting existing logs.
 * **Automation Safety**: `--quiet` never grants consent; `--non-interactive` preserves valid detected state and fails closed when required input is missing.
+
+-----
+
+## Recreating nginx_nginx-network
+
+Docker cannot change IPAM on a live network. On a new `nginx-network`, dynamic addresses come from `172.20.128.0/17`, and `172.20.0.2` through `172.20.127.254` stays reserved for static pins, with `172.20.0.2` for Nginx. If `nginx_nginx-network` already exists without `ip_range` `172.20.128.0/17`, the installer warns and leaves the subnet-only block in `/opt/nginx/docker-compose.yml`. The installer never runs this procedure.
+
+Applying the range is a planned maintenance-window step and needs George's approval. Do not use `docker network rm` or `docker network create`. A network created outside Compose can make the next `docker compose up` fail on a label mismatch.
+
+1. Detach every other stack from `nginx_nginx-network` with `down` or `rm`, not `stop`. A stopped container keeps the old network ID, and a later `docker start` fails after the network is recreated. `docker network inspect nginx_nginx-network` lists attached containers. Remove anything else it lists the same way. Continue only when `Containers` is empty.
+   * SweetSaving: `systemctl stop sweetsaving-compose`. If inspect still lists its containers, remove them from `/opt/sweetsaving` with the same flags used to bring it back:
+
+     ```bash
+     docker compose --env-file .env.local -f docker-compose.yml -f compose.production.yml down
+     ```
+
+     A plain `docker compose up -d` drops the `.3` and `.5` pins and publishes ports 8180, 4100, and 4101 on all interfaces.
+   * AlphaEngine ui is profile-gated. From `/opt/AlphaEngine`, remove it with `docker compose --profile ui rm ui`. Do not use `docker compose --profile ui stop ui`, and do not run `docker compose down` without `--profile ui`. Never start the worker or refresh profiles in this procedure.
+
+2. Recreate the Nginx network only after that inspect lists no attached containers. On a legacy host the compose file still has the subnet-only IPAM block, so `down` then `up -d` recreates `nginx_nginx-network` without `ip_range`.
+   * Before `up -d`, edit `/opt/nginx/docker-compose.yml` so the network IPAM is `subnet: 172.20.0.0/16`, `ip_range: 172.20.128.0/17`, and `gateway: 172.20.0.1`.
+   * From `/opt/nginx`, check it with `docker compose config`.
+   * Run `docker compose down`.
+   * Confirm `docker network inspect nginx_nginx-network` shows no attached containers, or that the network is gone. Otherwise `down`/`up` just recreates the same network. Do not run `up -d` until that is true.
+   * Run `docker compose up -d`.
+
+3. Bring the stacks back with the commands that pin their addresses.
+   * SweetSaving: `systemctl start sweetsaving-compose`, or, from `/opt/sweetsaving`, the same flags as the `down`:
+
+     ```bash
+     docker compose --env-file .env.local -f docker-compose.yml -f compose.production.yml up -d --remove-orphans
+     ```
+
+   * AlphaEngine, from `/opt/AlphaEngine`: `make docker-up`, or `docker compose --profile ui up -d ui`. Never start the worker or refresh profiles.
+
+4. Verify with `docker network inspect nginx_nginx-network`. `IPAM.Config` must show `IPRange` `172.20.128.0/17`. Nginx must be `172.20.0.2`, the sweetsaving frontend `172.20.0.3`, AlphaEngine ui `172.20.0.4`, and the sweetsaving backend `172.20.0.5`. Then confirm the sweetsaving public URL and `https://www.myalphaengine.com/healthz` both return healthy.
 
 -----
 

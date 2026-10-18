@@ -182,11 +182,7 @@ nginx_compose_ipam_yaml() {
 
 warn_legacy_nginx_network() {
     print_warning "nginx_nginx-network already exists without ip_range 172.20.128.0/17. Skipping network changes so Compose does not recreate nginx_nginx-network and take Nginx down. The installer never recreates this network."
-    print_warning "Applying the range is a planned maintenance-window step and needs George's approval. Do not use 'docker network rm' or 'docker network create'; a network created outside Compose can make the next 'docker compose up' fail on a label mismatch."
-    print_warning "1. Stop every other stack attached to nginx_nginx-network. Stop sweetsaving.com and AlphaEngine with 'docker compose down' or 'docker compose stop' in each stack's own directory. 'docker network inspect nginx_nginx-network' lists any other attached containers."
-    print_warning "2. In /opt/nginx, run 'docker compose down', then 'docker compose up -d'."
-    print_warning "3. Bring the stacks back with the compose files that already pin their addresses. In the sweetsaving.com directory, run its normal 'docker compose up -d' (frontend 172.20.0.3, backend 172.20.0.5). In /opt/AlphaEngine, run 'docker compose up -d' (ui 172.20.0.4)."
-    print_warning "4. Run 'docker network inspect nginx_nginx-network' and confirm IPAM.Config shows IPRange 172.20.128.0/17. Then confirm https://www.myalphaengine.com/healthz returns healthy once the stacks are back."
+    print_warning "Applying the range is a planned maintenance-window step and needs George's approval. Do not use 'docker network rm' or 'docker network create'. Follow the README section \"Recreating nginx_nginx-network\"."
 }
 
 # Write the container Compose file. An existing network without ip_range keeps
