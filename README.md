@@ -72,6 +72,8 @@ The modular version deliberately owns generated snippets and state; direct edits
   * Certificate import functionality for existing certificates
   * Certificate expiration monitoring and alerts
   * Persistent per-domain route snippets keep static-site or reverse-proxy routing intact when certificate configuration is regenerated
+  * A new route is a static-site stub unless you pass or enter a reverse-proxy upstream as `container:port`. Container Nginx resolves that upstream through Docker DNS (`resolver 127.0.0.11`) and a variable `proxy_pass`, so Nginx can start while the upstream container is down and picks up a new container address on the next request. Host Nginx uses a static `proxy_pass` because Docker's resolver is only available inside containers.
+  * Container names must be DNS labels and ports must be integers from 1 to 65535. An existing route file is never overwritten.
   * Container routes are stored in `/opt/nginx/conf.d/routes/<domain>.inc`; host Nginx routes are stored in `/etc/nginx/snippets/du-setup-routes/<domain>.inc`
   * After the initial installation, run `sudo -E ./du_setup_modular.sh --nginx-security` to manage additional sites and certificates without repeating the full server setup
 * **Nginx Security Monitoring**: Comprehensive monitoring and alerting:

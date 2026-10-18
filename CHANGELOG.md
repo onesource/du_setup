@@ -4,6 +4,7 @@
 
 - Limited dynamic allocation on the containerized Nginx Docker network to `172.20.128.0/17` (gateway `172.20.0.1`) so addresses `172.20.0.2` through `172.20.127.254` stay reserved for static pins, including Nginx at `172.20.0.2`.
 - Existing networks must be recreated in a maintenance window before the new pool applies; Docker cannot change IPAM on a live network.
+- Added an optional `container:port` reverse-proxy mode for a new domain route. Container Nginx resolves the upstream through Docker DNS on each request; host Nginx keeps a static `proxy_pass`. Existing route files are still left unchanged.
 
 ## Version 0.75.8_modular | 2026-09-06
 

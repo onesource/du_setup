@@ -75,11 +75,21 @@ escape_nginx_config() {
 # Create the application-routing portion of a domain config once. Certificate
 # operations may safely regenerate the surrounding TLS server block without
 # replacing an operator's static-site or reverse-proxy configuration.
+#
+# Optional fourth argument: a reverse-proxy upstream in container:port form.
+# An empty value on an interactive terminal prompts for one; Enter keeps the
+# static-root stub. Optional fifth argument: docker or system. When omitted,
+# docker is used unless system Nginx is active (the same systemctl check the
+# certificate flows use). Container Nginx resolves the upstream through Docker
+# DNS. Host Nginx has no Docker resolver and uses a static proxy_pass.
 ensure_nginx_domain_route() {
     local domain="$1"
     local route_dir="$2"
     local root_dir="$3"
+    local upstream="${4-}"
+    local nginx_type="${5-}"
     local route_file="$route_dir/$domain.inc"
+    local container="" port=""
 
     validate_domain "$domain" || return 1
     mkdir -p "$route_dir"
@@ -95,7 +105,84 @@ ensure_nginx_domain_route() {
         return 0
     fi
 
-    cat > "$route_file" << EOF
+    if [[ -z "$upstream" && "${NON_INTERACTIVE:-false}" != "true" && -t 0 ]]; then
+        if ! read -rp "$(printf '%s' "${CYAN}Reverse proxy upstream (container:port), or Enter for a static site: ${NC}")" upstream; then
+            print_info "No reverse proxy upstream entered. Creating a static site route."
+            upstream=""
+        fi
+    fi
+    upstream="${upstream#"${upstream%%[![:space:]]*}"}"
+    upstream="${upstream%"${upstream##*[![:space:]]}"}"
+
+    if [[ -n "$upstream" ]]; then
+        if [[ "$upstream" != *:* || "$upstream" == *:*:* ]]; then
+            print_error "Invalid reverse proxy upstream '$upstream'. Expected container:port."
+            return 1
+        fi
+        container="${upstream%%:*}"
+        port="${upstream#*:}"
+        if [[ ! "$container" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]]; then
+            print_error "Invalid container name '$container'. Use a DNS label: letters, digits, and hyphens, 1-63 characters, and do not start or end with a hyphen."
+            return 1
+        fi
+        if [[ ! "$port" =~ ^[1-9][0-9]{0,4}$ ]] || (( port < 1 || port > 65535 )); then
+            print_error "Invalid upstream port '$port'. Use an integer from 1 to 65535."
+            return 1
+        fi
+
+        if [[ -z "$nginx_type" ]]; then
+            if systemctl is-active --quiet nginx 2>/dev/null; then
+                nginx_type="system"
+            else
+                nginx_type="docker"
+            fi
+        fi
+
+        case "$nginx_type" in
+            docker)
+                cat > "$route_file" << EOF
+# Application routing for $domain.
+# This file is created once and is not overwritten by certificate operations.
+location / {
+    resolver 127.0.0.11 valid=10s ipv6=off;
+    set \$upstream_app http://${container}:${port};
+    proxy_pass \$upstream_app;
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Forwarded-Host \$host;
+    proxy_set_header CF-IPCountry \$http_cf_ipcountry;
+}
+EOF
+                ;;
+            system)
+                cat > "$route_file" << EOF
+# Application routing for $domain.
+# This file is created once and is not overwritten by certificate operations.
+# Host Nginx does not use Docker DNS, so the upstream is resolved when Nginx starts.
+location / {
+    proxy_pass http://${container}:${port};
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Forwarded-Host \$host;
+    proxy_set_header CF-IPCountry \$http_cf_ipcountry;
+}
+EOF
+                ;;
+            *)
+                print_error "Unknown Nginx type '$nginx_type'. Use docker or system."
+                return 1
+                ;;
+        esac
+    else
+        cat > "$route_file" << EOF
 # Application routing for $domain.
 # This file is created once and is not overwritten by certificate operations.
 location / {
@@ -103,6 +190,7 @@ location / {
     try_files \$uri \$uri/ =404;
 }
 EOF
+    fi
     chmod 644 "$route_file"
     print_success "Created persistent domain route: $route_file"
 }
@@ -994,7 +1082,7 @@ update_nginx_https_config() {
         chmod 600 "/opt/nginx/certs/$DOMAIN.key"
     fi
 
-    ensure_nginx_domain_route "$DOMAIN" "$ROUTE_DIR" "$ROOT_DIR" || return 1
+    ensure_nginx_domain_route "$DOMAIN" "$ROUTE_DIR" "$ROOT_DIR" "" "$NGINX_TYPE" || return 1
 
     # Legacy Cleanup: Remove or backup the old non-domain-specific config
     if [[ -f "$CONFIG_DIR/https.conf" ]]; then
@@ -1223,7 +1311,7 @@ regenerate_https_config() {
         ROUTE_INCLUDE_PATH="$ROUTE_DIR/$DOMAIN.inc"
     fi
 
-    ensure_nginx_domain_route "$DOMAIN" "$ROUTE_DIR" "$ROOT_DIR" || return 1
+    ensure_nginx_domain_route "$DOMAIN" "$ROUTE_DIR" "$ROOT_DIR" "" "$NGINX_TYPE" || return 1
 
     # 4. Backup existing
     local CONFIG_FILE="$CONFIG_DIR/$DOMAIN.conf"
