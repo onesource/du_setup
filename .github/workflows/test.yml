@@ -239,3 +239,6 @@ jobs:
 
       - name: Test persistent Nginx domain routes
         run: bash tests/test_nginx_domain_routes.sh
+
+      - name: Test Nginx security shortcut
+        run: bash tests/test_nginx_security_shortcut.sh

@@ -227,6 +227,14 @@ main() {
 
     collect_config
     install_packages
+    if offer_nginx_security_shortcut; then
+        print_info "Skipping the remaining setup and opening Nginx Security Configuration."
+        log "Skipped the remaining setup after package installation because the server hostname was already set."
+        configure_nginx_security
+        print_success "Nginx Security Configuration completed. The remaining setup was skipped."
+        log "Nginx Security Configuration completed after skipping the remaining setup."
+        return 0
+    fi
     setup_user
     configure_system
     configure_firewall

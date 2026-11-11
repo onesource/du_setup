@@ -1,5 +1,9 @@
 # Changelog for du_setup_modular.sh
 
+## Version 0.75.10_modular | 2026-11-10
+
+- After package installation, if the confirmed server hostname is already the live static hostname and is not a fresh-image placeholder, ask whether to skip the remaining setup and open Nginx Security Configuration. The default answer is no. `--non-interactive` does not ask and continues the full setup.
+
 ## Version 0.75.9_modular | 2026-10-18
 
 - Limited dynamic allocation on a newly created containerized Nginx Docker network to `172.20.128.0/17` (gateway `172.20.0.1`) so addresses `172.20.0.2` through `172.20.127.254` stay reserved for static pins, including Nginx at `172.20.0.2`.

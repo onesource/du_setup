@@ -331,6 +331,26 @@ EOF
         log "Dependency check completed."
     }
 
+    # A live static hostname counts as already set when it is valid and is not a
+    # stock name from a fresh image.
+    hostname_is_already_configured() {
+        local name="$1" lower
+        validate_hostname "$name" || return 1
+        lower="${name,,}"
+        case "$lower" in
+            localhost|localhost.localdomain|debian|ubuntu|'(none)') return 1 ;;
+        esac
+        return 0
+    }
+
+    # Offer the shortcut only when this run kept an already configured hostname.
+    offer_nginx_security_shortcut() {
+        [[ "${NON_INTERACTIVE:-false}" == "true" ]] && return 1
+        [[ "${HOSTNAME_ALREADY_CONFIGURED:-false}" == "true" ]] || return 1
+        [[ -n "${CONFIGURED_HOSTNAME:-}" && "${SERVER_NAME:-}" == "$CONFIGURED_HOSTNAME" ]] || return 1
+        confirm "Server hostname '${SERVER_NAME}' is already set. Skip the remaining setup and go directly to Nginx Security Configuration?" "n"
+    }
+
     collect_config() {
         print_section "Configuration Setup"
         local discovered_admin="" current_hostname current_pretty
@@ -358,6 +378,13 @@ EOF
         id "$USERNAME" &>/dev/null && USER_EXISTS=true || USER_EXISTS=false
 
         current_hostname=$(hostnamectl --static 2>/dev/null || hostname)
+        if hostname_is_already_configured "$current_hostname"; then
+            HOSTNAME_ALREADY_CONFIGURED=true
+            CONFIGURED_HOSTNAME="$current_hostname"
+        else
+            HOSTNAME_ALREADY_CONFIGURED=false
+            CONFIGURED_HOSTNAME=""
+        fi
         SERVER_NAME=$(prompt_value_current "Server hostname" "$current_hostname" validate_hostname)
         current_pretty=$(hostnamectl --pretty 2>/dev/null || true)
         current_pretty=${current_pretty:-$current_hostname}

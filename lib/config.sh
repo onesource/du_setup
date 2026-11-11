@@ -27,7 +27,7 @@ case "$LETSENCRYPT_ENVIRONMENT" in
 esac
 
 # --- Update Configuration ---
-CURRENT_VERSION="0.75.9_modular"
+CURRENT_VERSION="0.75.10_modular"
 SCRIPT_URL="https://raw.githubusercontent.com/onesource/du_setup/refs/heads/main/du_setup_modular.sh"
 CONFIG_URL="https://raw.githubusercontent.com/onesource/du_setup/refs/heads/main/lib/config.sh"
 CHECKSUM_URL="${SCRIPT_URL}.sha256"
@@ -59,6 +59,9 @@ CLEANUP_PREVIEW=false
 CLEANUP_ONLY=false
 SKIP_CLEANUP=false
 NGINX_SECURITY_ONLY=false
+# Set during configuration when the live static hostname is already a real name.
+HOSTNAME_ALREADY_CONFIGURED=false
+CONFIGURED_HOSTNAME=""
 
 # --- Environment Detection Variables ---
 DETECTED_VIRT_TYPE=""

@@ -7,9 +7,9 @@
 
 -----
 
-**Version:** v0.75.9_modular
+**Version:** v0.75.10_modular
 
-**Last Updated:** 2026-10-18
+**Last Updated:** 2026-11-10
 
 **Compatible With:**
 
@@ -77,7 +77,8 @@ The modular version deliberately owns generated snippets and state; direct edits
   * The generated proxy block matches the live header set and does not set `Upgrade` or `Connection`, so it does not proxy WebSockets.
   * An existing route file is never overwritten. If an upstream is requested anyway, the run warns that it was not applied. `nginx -t` runs before every reload. When the test fails, a route file created in that run is removed and the server config is restored to its previous state. A route file that already existed is left in place.
   * Container routes are stored in `/opt/nginx/conf.d/routes/<domain>.inc`; host Nginx routes are stored in `/etc/nginx/snippets/du-setup-routes/<domain>.inc`
-  * After the initial installation, run `sudo -E ./du_setup_modular.sh --nginx-security` to manage additional sites and certificates without repeating the full server setup
+  * After the initial installation, run `sudo -E bash ./du_setup_modular.sh --nginx-security` to manage additional sites and certificates without repeating the full server setup
+  * On a later full run, after package installation, if the confirmed server hostname is already the live static hostname, the installer asks whether to skip the remaining setup and open Nginx Security Configuration. Press `y` to skip. Enter keeps the full setup. `--non-interactive` does not ask.
 * **Nginx Security Monitoring**: Comprehensive monitoring and alerting:
   * Log analysis with attack pattern detection
   * Fail2Ban integration for Nginx-specific rules
