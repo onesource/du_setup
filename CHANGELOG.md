@@ -1,5 +1,9 @@
 # Changelog for du_setup_modular.sh
 
+## Version 0.75.10_modular | 2026-11-10
+
+- The container Nginx default site is now `default_server` on ports 8080 and 8443, which are host ports 80 and 443. A hostname with no site of its own serves `/opt/nginx/html/index.html` instead of falling through to the first named site. Keeping an existing Nginx container rewrites that default site, tests the configuration, and reloads it.
+
 ## Version 0.75.9_modular | 2026-10-18
 
 - Limited dynamic allocation on a newly created containerized Nginx Docker network to `172.20.128.0/17` (gateway `172.20.0.1`) so addresses `172.20.0.2` through `172.20.127.254` stay reserved for static pins, including Nginx at `172.20.0.2`.

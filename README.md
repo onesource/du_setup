@@ -7,9 +7,9 @@
 
 -----
 
-**Version:** v0.75.9_modular
+**Version:** v0.75.10_modular
 
-**Last Updated:** 2026-10-18
+**Last Updated:** 2026-11-10
 
 **Compatible With:**
 
@@ -64,6 +64,7 @@ The modular version deliberately owns generated snippets and state; direct edits
   * **Containerized Nginx** (recommended): Docker-based deployment with security-hardened configuration, SSL/TLS support, and resource limits
   * **Host-based Nginx**: Direct installation on the system for traditional deployments
   * Includes security headers, rate limiting, access controls, and performance optimizations
+  * A hostname with no site of its own is served by the default server from `/opt/nginx/html/index.html` on ports 80 and 443. It does not fall through to another site such as MyAlphaEngine.
   * On a new `nginx-network` (`172.20.0.0/16`, gateway `172.20.0.1`), `172.20.0.2` through `172.20.127.254` is reserved for static pins, with `172.20.0.2` for Nginx. Every new site either pins a static IPv4 in that low range or takes a dynamic address from `172.20.128.0/17`.
   * If `nginx_nginx-network` already exists without `ip_range` `172.20.128.0/17`, the installer warns, writes the previous subnet-only IPAM block, and skips changing the network. The installer never recreates this network. Applying the range is a planned maintenance-window step and needs George's approval. Do not use `docker network rm` or `docker network create`. The steps are in [Recreating nginx_nginx-network](#recreating-nginx_nginx-network).
 * **Nginx Certificate Management**: Automated SSL/TLS certificate handling:
