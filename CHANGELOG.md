@@ -3,6 +3,7 @@
 ## Version 0.75.10_modular | 2026-11-10
 
 - After package installation, if the confirmed server hostname is already the live static hostname and is not a fresh-image placeholder, ask whether to skip the remaining setup and open Nginx Security Configuration. The default answer is no. `--non-interactive` does not ask and continues the full setup.
+- The container Nginx default site is now `default_server` on ports 8080 and 8443, which are host ports 80 and 443. A hostname with no site of its own serves `/opt/nginx/html/index.html` instead of falling through to the first named site. Keeping an existing Nginx container rewrites that default site, tests the configuration, and reloads it.
 
 ## Version 0.75.9_modular | 2026-10-18
 

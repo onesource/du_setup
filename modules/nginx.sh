@@ -59,6 +59,9 @@ install_nginx() {
         else
             print_info "Keeping existing container."
             log "Existing container preserved."
+            # An unknown hostname must keep serving the default page. Named sites
+            # listen on the same ports and would otherwise become the fallback.
+            apply_nginx_default_site || return 1
         fi
     fi
 
@@ -256,6 +259,152 @@ ${ipam_yaml}
 EOF
 }
 
+# Write the catch-all site. Host ports 80 and 443 reach this server when a
+# hostname has no site of its own, and the page is /opt/nginx/html/index.html.
+write_nginx_default_conf() {
+    local dest="$1"
+    cat > "$dest" << 'EOF'
+# Default site for hostnames that do not have their own server block.
+# Ports 80 and 443 on the host map to 8080 and 8443. This server is
+# default_server so another site cannot answer those requests.
+server {
+    listen 8080 default_server;
+    listen 8443 ssl default_server;
+    server_name _;
+
+    ssl_certificate /etc/nginx/certs/default.pem;
+    ssl_certificate_key /etc/nginx/certs/default.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    # Security settings - Rate limiting enabled
+    limit_req zone=general burst=40 nodelay;
+    limit_conn conn_limit_per_ip 10;
+
+    server_tokens off;
+
+    # /opt/nginx/html is mounted at this path
+    root   /usr/share/nginx/html;
+    index  index.html index.htm;
+
+    location /health {
+        access_log off;
+        allow all;
+        return 200 "healthy\n";
+        add_header Content-Type text/plain;
+    }
+
+    location ~ /\. {
+        deny all;
+        access_log off;
+        log_not_found off;
+    }
+
+    location ~ ~$ {
+        deny all;
+        access_log off;
+        log_not_found off;
+    }
+
+    location ~* \.(bak|backup|config|conf|ini|log|old|orig|save|sql|swp|tmp)$ {
+        deny all;
+        access_log off;
+        log_not_found off;
+    }
+
+    location ~* \.(conf|config|ini|log|sql|sh|py|pl)$ {
+        deny all;
+        access_log off;
+        log_not_found off;
+    }
+
+    location ~* ^/\. {
+        deny all;
+        access_log off;
+        log_not_found off;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    location /nginx_status {
+        stub_status on;
+        access_log off;
+        allow 127.0.0.1;
+        allow 172.20.0.0/16;
+        deny all;
+        limit_req zone=general burst=5 nodelay;
+    }
+
+    error_page   500 502 503 504  /50x.html;
+    location = /50x.html {
+        root   /usr/share/nginx/html;
+        internal;
+    }
+
+    access_log  /var/log/nginx/default_access.log  main;
+    error_log   /var/log/nginx/default_error.log warn;
+}
+EOF
+}
+
+ensure_nginx_default_certificate() {
+    local prefix="${NGINX_PREFIX:-/opt/nginx}"
+    local cert="$prefix/certs/default.pem"
+    local key="$prefix/certs/default.key"
+    mkdir -p "$prefix/certs"
+    if [[ -s "$cert" && -s "$key" ]]; then
+        return 0
+    fi
+    if ! command -v openssl >/dev/null 2>&1; then
+        print_error "openssl is required to create the default Nginx certificate."
+        return 1
+    fi
+    openssl req -x509 -nodes -newkey rsa:2048 \
+        -keyout "$key" -out "$cert" -days 3650 \
+        -subj "/CN=nginx-default" >/dev/null 2>&1 || return 1
+    chown 101:101 "$cert" "$key" 2>/dev/null || true
+    chmod 644 "$cert"
+    chmod 600 "$key"
+}
+
+# Install the catch-all site and reload a running container after nginx -t.
+# A failed test restores the previous default.conf.
+apply_nginx_default_site() {
+    local prefix="${NGINX_PREFIX:-/opt/nginx}"
+    local dest="$prefix/conf.d/default.conf"
+    local backup=""
+    mkdir -p "$prefix/conf.d" "$prefix/html"
+    ensure_nginx_default_certificate || return 1
+    if [[ -f "$dest" ]]; then
+        backup=$(mktemp)
+        cp "$dest" "$backup"
+    fi
+    write_nginx_default_conf "$dest"
+    chown 101:101 "$dest" 2>/dev/null || true
+    chmod 644 "$dest"
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx nginx; then
+        if ! docker exec nginx nginx -t; then
+            if [[ -n "$backup" ]]; then
+                cp "$backup" "$dest"
+                print_error "Nginx rejected the default site. The previous default.conf was restored."
+            else
+                rm -f "$dest"
+                print_error "Nginx rejected the default site."
+            fi
+            rm -f "$backup"
+            return 1
+        fi
+        if ! docker exec nginx nginx -s reload; then
+            rm -f "$backup"
+            print_error "Nginx accepted the default site but the reload failed."
+            return 1
+        fi
+        print_success "Unknown hostnames now serve the default Nginx page."
+    fi
+    rm -f "$backup"
+}
+
 # --- Containerized Nginx Installation ---
 install_nginx_container() {
     if ! docker compose version >/dev/null 2>&1; then
@@ -406,155 +555,8 @@ proxy_hide_header Server;
 # This requires building nginx from source with the headers-more module
 EOF
 
-    # Create default site configuration with security
-    cat > /opt/nginx/conf.d/default.conf << 'EOF'
-# Default site with security hardening
-# Using nginxinc/nginx-unprivileged:alpine (runs on port 8080)
-server {
-    listen 8080;
-    #server_name default.localhost;
-    server_name _;
-
-    # Security settings - Rate limiting enabled
-    limit_req zone=general burst=40 nodelay;
-    limit_conn conn_limit_per_ip 10;
-
-    # Hide server information
-    server_tokens off;
-    # Note: To fully hide "Server: nginx" header, you need nginx-mod-http-headers-more module
-    # This requires building nginx from source with the headers-more module
-    # Use Dockerfile.headers-more for this functionality
-
-    # Root directory
-    root   /usr/share/nginx/html;
-    index  index.html index.htm;
-
-    # Health check endpoint - MUST BE FIRST to avoid conflicts with other location blocks
-    location /health {
-        access_log off;
-        allow all; # Allow all IPs including Docker bridge network (172.20.0.1)
-        return 200 "healthy\n";
-        add_header Content-Type text/plain;
-    }
-
-    # Security: Block access to sensitive files
-    location ~ /\. {
-        deny all;
-        access_log off;
-        log_not_found off;
-    }
-
-    location ~ ~$ {
-        deny all;
-        access_log off;
-        log_not_found off;
-    }
-
-    # Block access to backup files
-    location ~* \.(bak|backup|config|conf|ini|log|old|orig|save|sql|swp|tmp)$ {
-        deny all;
-        access_log off;
-        log_not_found off;
-    }
-
-    # Block access to configuration files
-    location ~* \.(conf|config|ini|log|sql|sh|py|pl)$ {
-        deny all;
-        access_log off;
-        log_not_found off;
-    }
-
-    # Prevent access to hidden files and directories
-    location ~* ^/\. {
-        deny all;
-        access_log off;
-        log_not_found off;
-    }
-
-    # Main location
-    location / {
-        try_files $uri $uri/ =404;
-
-        # Security: Prevent clickjacking
-        add_header X-Frame-Options "SAMEORIGIN" always;
-
-        # Security: Prevent MIME-type sniffing
-        add_header X-Content-Type-Options "nosniff" always;
-
-        # Security: XSS protection
-        add_header X-XSS-Protection "1; mode=block" always;
-
-        # Security: Enhanced XSS protection via CSP (allows Chart.js CDN for dashboard)
-        add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; img-src 'self' data: https:; font-src 'self' https://cdn.jsdelivr.net; connect-src 'self' https://cdn.jsdelivr.net; frame-ancestors 'self'; form-action 'self'; object-src 'none'; base-uri 'self';" always;
-    }
-
-    # Nginx status (restricted to localhost)
-    location /nginx_status {
-        stub_status on;
-        access_log off;
-        allow 127.0.0.1;
-        allow 172.20.0.0/16; # Allow the Docker bridge network
-        deny all;
-        limit_req zone=general burst=5 nodelay;
-    }
-
-    # Error pages
-    error_page   500 502 503 504  /50x.html;
-    location = /50x.html {
-        root   /usr/share/nginx/html;
-        internal;
-    }
-
-    # Logging
-    access_log  /var/log/nginx/default_access.log  main;
-    error_log   /var/log/nginx/default_error.log warn;
-}
-
-# HTTPS redirect template (uncomment and configure for production)
-# server {
-#     listen 8080;
-#     server_name your-domain.com;
-#     return 301 https://$server_name$request_uri;
-# }
-#
-# server {
-#     listen 8443 ssl;
-#     http2 on;
-#     server_name your-domain.com;
-#
-#     # SSL configuration
-#     ssl_certificate /etc/nginx/certs/cert.pem;
-#     ssl_certificate_key /etc/nginx/certs/key.pem;
-#     ssl_session_timeout 1d;
-#     ssl_session_cache shared:SSL:50m;
-#     ssl_session_tickets off;
-#
-#     # Modern SSL configuration
-#     ssl_protocols TLSv1.2 TLSv1.3;
-#     ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
-#     ssl_prefer_server_ciphers off;
-#
-#     # HSTS
-#     add_header Strict-Transport-Security "max-age=63072000" always;
-#
-#     # Other security headers included from security-headers.conf
-#
-#     # Root and other configurations same as above
-#     root /usr/share/nginx/html;
-#     index  index.html index.htm;
-#
-#     # Health check endpoint - MUST BE FIRST to avoid conflicts with other location blocks
-#     location /health {
-#         access_log off;
-#         allow all;  # Allow all IPs including Docker bridge network (172.20.0.1)
-#         return 200 "healthy\n";
-#         add_header Content-Type text/plain;
-#     }
-#
-#     # ... (other location blocks)
-# }
-EOF
-
+    # Unknown hostnames serve /opt/nginx/html/index.html on ports 80 and 443.
+    apply_nginx_default_site || return 1
     # Create a simple index.html
     cat > /opt/nginx/html/index.html << 'EOF'
 <!DOCTYPE html>
