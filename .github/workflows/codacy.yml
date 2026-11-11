@@ -58,6 +58,10 @@ jobs:
         shell: bash
         run: bash tests/test_nginx_domain_routes.sh
 
+      - name: Test Nginx security shortcut
+        shell: bash
+        run: bash tests/test_nginx_security_shortcut.sh
+
       - name: Test version metadata consistency
         shell: bash
         run: bash tests/test_version_metadata.sh
